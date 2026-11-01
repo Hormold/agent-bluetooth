@@ -1,37 +1,46 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="840" viewBox="0 0 1600 840" font-family="'Geist','Inter','SF Pro Display',-apple-system,sans-serif">
-  <rect width="1600" height="840" fill="#0A0A0A"/>
-  <!-- hairline frame -->
-  <rect x="0.5" y="0.5" width="1599" height="839" fill="none" stroke="#1A1A1A" stroke-width="1"/>
+  <defs>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="16" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- canonical bluetooth rune, 24x24 feather geometry -->
+    <path id="bt" d="M6.5 6.5 L17.5 17.5 L12 23 L12 1 L17.5 6.5 L6.5 17.5"/>
+  </defs>
 
-  <!-- top row: mark + name -->
-  <g transform="translate(96,92)">
-    <g>
-      <path d="M12 2 L24 11 L6 24 L6 2 L6 38 L24 29 L12 38" fill="none" stroke="#FAFAFA" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
-    </g>
-    <text x="48" y="22" font-size="20" fill="#A1A1A1" font-family="'Geist Mono','SF Mono',Menlo,monospace" letter-spacing="0.5">agent-bluetooth</text>
+  <rect width="1600" height="840" fill="#0A0A0A"/>
+  <rect x="0.5" y="0.5" width="1599" height="839" fill="none" stroke="#1A1A1A"/>
+
+  <!-- top row -->
+  <g transform="translate(96,86)">
+    <use href="#bt" transform="scale(1.7)" fill="none" stroke="#FAFAFA" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+    <text x="56" y="30" font-size="20" fill="#A1A1A1" font-family="'Geist Mono','SF Mono',Menlo,monospace" letter-spacing="0.5">agent-bluetooth</text>
+    <text x="1408" y="30" font-size="18" fill="#5A5A5A" font-family="'Geist Mono','SF Mono',Menlo,monospace" text-anchor="end">open source · pure python</text>
+  </g>
+
+  <!-- big faint blue bluetooth glyph on the right -->
+  <g transform="translate(1240,250) scale(14)">
+    <use href="#bt" fill="none" stroke="#0E2235" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+    <use href="#bt" fill="none" stroke="#1E6FE0" stroke-width="0.22" stroke-linejoin="round" stroke-linecap="round" opacity="0.6" filter="url(#glow)"/>
   </g>
 
   <!-- headline -->
-  <g transform="translate(94,330)">
-    <text font-size="132" font-weight="700" letter-spacing="-5" fill="#FAFAFA">
+  <g transform="translate(94,336)">
+    <text font-size="138" font-weight="700" letter-spacing="-5.5" fill="#FAFAFA">
       <tspan x="0" y="0">Your phone,</tspan>
-      <tspan x="0" y="150">as an API.</tspan>
+      <tspan x="0" y="156">as an <tspan fill="#4DA3FF">API</tspan>.</tspan>
     </text>
   </g>
 
   <!-- subhead -->
-  <text x="96" y="690" font-size="30" fill="#8A8A8A" font-weight="400" letter-spacing="-0.3">Calls &amp; SMS over plain Bluetooth. No Twilio, no SIP, no second number.</text>
+  <text x="96" y="696" font-size="30" fill="#8A8A8A" letter-spacing="-0.3">Calls &amp; SMS over plain Bluetooth. No Twilio, no SIP, no second number.</text>
 
   <!-- mono command -->
-  <g transform="translate(96,742)" font-family="'Geist Mono','SF Mono',Menlo,monospace">
-    <text font-size="22" fill="#5A5A5A"><tspan fill="#5A5A5A">$ </tspan><tspan fill="#D4D4D4">agent-bluetooth</tspan> watch | call | bridge | sms</text>
-  </g>
+  <text x="96" y="748" font-size="22" font-family="'Geist Mono','SF Mono',Menlo,monospace"><tspan fill="#4DA3FF">$</tspan><tspan fill="#D4D4D4" xml:space="preserve">  agent-bluetooth </tspan><tspan fill="#5A5A5A">watch | call | bridge | sms</tspan></text>
 
-  <!-- right: faint oversized bluetooth glyph -->
-  <g transform="translate(1180,250)" opacity="0.9">
-    <path d="M60 10 L150 80 L20 180 L20 10 L20 290 L150 220 L60 290"
-          fill="none" stroke="#161616" stroke-width="26" stroke-linejoin="round" stroke-linecap="round"/>
-    <path d="M60 10 L150 80 L20 180 L20 10 L20 290 L150 220 L60 290"
-          fill="none" stroke="#242424" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- LiveKit compatible (official logo) -->
+  <g transform="translate(1316,730)">
+    <path transform="scale(1.0)" fill="#FFFFFF" d="M0 0v24h14.4v-4.799h4.8V24H24v-4.8h-4.799v-4.8h-4.8v4.8H4.8V0H0zm14.4 14.4V9.602h4.801V4.8H24V0h-4.8v4.8h-4.8v4.8H9.6v4.8h4.8z"/>
+    <text x="36" y="19" font-size="20" font-family="'Geist','Inter',sans-serif"><tspan fill="#F0F0F0" font-weight="600">LiveKit</tspan><tspan fill="#8A8A8A" xml:space="preserve">  compatible</tspan></text>
   </g>
 </svg>

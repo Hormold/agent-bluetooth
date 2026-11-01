@@ -16,6 +16,9 @@ agent.
 > Inspired by an idea from **[Grigory Bakunov (@bobuk)](https://github.com/bobuk)** —
 > a phone as a universal Bluetooth-attached controller. This is a small, hackable
 > build of it. Weekend project; expect rough edges.
+>
+> Not affiliated with LiveKit. It just uses [LiveKit](https://livekit.io) to bridge
+> your phone's calls into a room you — or an AI agent — can join.
 
 ## What you can do
 
