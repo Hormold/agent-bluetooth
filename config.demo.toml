@@ -1,0 +1,22 @@
+# No hardware needed: a fake phone + fake SMS against a local LiveKit server.
+#   livekit-server --dev            (in another terminal)
+#   uv run agent-bluetooth config.demo.toml
+#   open http://localhost:8080 and press "call" under Simulate
+
+[phone]
+adapter = "fake"
+
+[messages]
+adapter = "fake"
+
+[bridge]
+adapter = "livekit"          # LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET, defaults = livekit-server --dev
+
+[routing]
+answer = "on_join"           # auto | on_join | manual
+
+[[sinks]]
+adapter = "log"
+
+[http]
+port = 8080

@@ -1,0 +1,47 @@
+# Real phone over Bluetooth. Copy to config.toml and edit.
+
+[bluetooth]
+transport = "usb:0"          # USB dongle. Linux built-in: "hci-socket:0" (stop bluetoothd for it)
+name = "Agent Bluetooth"     # what the phone shows when pairing
+keystore = "~/.agent-bluetooth/keys.json"
+
+[phone]
+adapter = "bumble-hfp"       # calls + call audio via Hands-Free Profile
+reconnect_every = 30         # seconds; re-dial the paired phone after restarts
+
+[messages]
+adapter = "bumble-map"       # SMS via Message Access Profile; "none" to disable
+poll_every = 5
+fetch_full = false           # true = fetch whole text (marks SMS read on most phones)
+
+[bridge]
+adapter = "livekit"
+url = "${LIVEKIT_URL}"                 # wss://xxx.livekit.cloud or ws://localhost:7880
+api_key = "${LIVEKIT_API_KEY}"
+api_secret = "${LIVEKIT_API_SECRET}"
+# client_url = "ws://192.168.1.10:7880"  # what browsers use, if different from url
+room_prefix = "call-"
+# agent_name = "my-agent"              # dispatch a LiveKit agent into every call room
+
+[routing]
+answer = "on_join"           # auto: pick up at once | on_join: when someone joins | manual
+hangup_on_empty = true       # hang up when the last person/agent leaves the room
+
+[[sinks]]
+adapter = "log"
+
+[[sinks]]
+adapter = "telegram"
+bot_token = "${TELEGRAM_BOT_TOKEN}"
+chat_id = "${TELEGRAM_CHAT_ID}"
+web_url = "http://raspberrypi.local:8080"   # adds a "Join the call" link
+
+# [[sinks]]
+# adapter = "webhook"
+# url = "https://example.com/hook"
+# events = ["sms.received", "call.ringing"]   # empty = everything
+
+[http]
+host = "0.0.0.0"
+port = 8080
+api_key = "${AGENT_BLUETOOTH_KEY:-}"         # set it if the box is reachable from outside

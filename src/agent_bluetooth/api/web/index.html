@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Agent Bluetooth</title>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #fafafa; --card: #fff; --text: #18181b; --muted: #71717a; --line: rgba(0,0,0,.06);
+    --accent: #2563eb; --ok: #16a34a; --bad: #dc2626;
+    --shadow: 0 0 0 1px rgba(0,0,0,.05), 0 1px 2px rgba(0,0,0,.04), 0 2px 8px rgba(0,0,0,.03);
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #09090b; --card: #18181b; --text: #fafafa; --muted: #a1a1aa; --line: rgba(255,255,255,.08);
+      --shadow: 0 0 0 1px rgba(255,255,255,.07); }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); min-height: 100dvh;
+    padding: max(24px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  main { max-width: 720px; margin: 0 auto; display: grid; gap: 16px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  h1 { font-size: 20px; margin: 0; text-wrap: balance; }
+  h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 12px; text-transform: uppercase; }
+  .card { background: var(--card); border-radius: 16px; padding: 16px; box-shadow: var(--shadow); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); transition: background-color 200ms ease; }
+  .dot.on { background: var(--ok); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .list { display: grid; gap: 8px; }
+  .item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px;
+    border-radius: 10px; background: var(--bg);
+    transition: opacity 250ms var(--ease-out), transform 250ms var(--ease-out); }
+  @starting-style { .item { opacity: 0; transform: translateY(6px); } }
+  .item .who { font-weight: 600; }
+  .item .sub { font-size: 13px; color: var(--muted); text-wrap: pretty; }
+  .empty { font-size: 14px; color: var(--muted); }
+  button { font: inherit; font-size: 14px; font-weight: 500; border: 0; border-radius: 8px; padding: 0 14px;
+    min-height: 40px; cursor: pointer; background: var(--bg); color: var(--text); box-shadow: var(--shadow);
+    transition: transform 160ms var(--ease-out), opacity 160ms ease; }
+  button:active { transform: scale(0.96); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); color: #fff; box-shadow: none; }
+  button.danger { background: var(--bad); color: #fff; box-shadow: none; }
+  input { font: inherit; font-size: 14px; min-height: 40px; padding: 0 12px; border-radius: 8px; border: 0;
+    background: var(--bg); color: var(--text); box-shadow: var(--shadow); flex: 1; min-width: 140px; }
+  .live { display: none; }
+  .live.on { display: flex; }
+  .meter { width: 80px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .meter > i { display: block; height: 100%; width: 100%; background: var(--ok); transform-origin: left;
+    transform: scaleX(0); transition: transform 100ms linear; }
+  .err { color: var(--bad); font-size: 13px; min-height: 1em; }
+  pre { margin: 0; font-size: 12px; color: var(--muted); max-height: 220px; overflow: auto; white-space: pre-wrap; }
+  @media (prefers-reduced-motion: reduce) { .item, button { transition: opacity 150ms ease; } button:active { transform: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Agent Bluetooth</h1>
+    <span class="pill"><span class="dot" id="dot"></span><span id="phone">No phone</span></span>
+  </header>
+
+  <section class="card">
+    <h2>Calls</h2>
+    <div class="row live" id="live">
+      <span class="pill">In <b id="liveRoom"></b></span>
+      <div class="meter" aria-label="Call audio level"><i id="meter"></i></div>
+      <button id="mute">Mute</button>
+      <button class="danger" id="leave">Leave</button>
+    </div>
+    <div class="list" id="calls"></div>
+    <div class="row" style="margin-top:12px">
+      <input id="dialTo" placeholder="+1 555 123 4567" inputmode="tel" aria-label="Number to call" />
+      <button id="dial">Call</button>
+    </div>
+    <div class="err" id="callErr"></div>
+  </section>
+
+  <section class="card">
+    <h2>Messages</h2>
+    <div class="list" id="sms"></div>
+    <div class="row" style="margin-top:12px">
+      <input id="smsTo" placeholder="To" inputmode="tel" aria-label="SMS recipient" style="max-width:160px" />
+      <input id="smsText" placeholder="Message" aria-label="SMS text" />
+      <button id="smsSend">Send</button>
+    </div>
+    <div class="err" id="smsErr"></div>
+  </section>
+
+  <section class="card" id="simCard" hidden>
+    <h2>Simulate</h2>
+    <div class="row" id="sim"></div>
+  </section>
+
+  <section class="card">
+    <h2>Events</h2>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+if (params.get("key")) localStorage.setItem("abKey", params.get("key"));
+const KEY = localStorage.getItem("abKey") || "";
+const LK = window.LivekitClient;
+let room = null, sms = [];
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "Content-Type": "application/json", ...(KEY && { Authorization: `Bearer ${KEY}` }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+function el(tag, attrs = {}, ...kids) {
+  const e = Object.assign(document.createElement(tag), attrs);
+  e.append(...kids.filter(Boolean));
+  return e;
+}
+
+function guard(errId, fn) {
+  return async () => {
+    $(errId).textContent = "";
+    try { await fn(); } catch (e) { $(errId).textContent = e.message; }
+  };
+}
+
+function renderCalls(calls) {
+  const box = $("calls");
+  box.replaceChildren();
+  if (!calls.length) return box.append(el("div", { className: "empty", textContent: "No calls right now. Calls to your phone show up here." }));
+  for (const c of calls) {
+    const actions = el("div", { className: "row" });
+    if (c.room && room?.name !== c.room)
+      actions.append(el("button", { className: "primary", textContent: "Join", onclick: guard("callErr", () => join(c.room)) }));
+    if (c.state === "ringing")
+      actions.append(el("button", { textContent: "Answer", onclick: guard("callErr", () => api("/api/calls/answer", {})) }));
+    actions.append(el("button", { textContent: c.state === "ringing" ? "Decline" : "Hang up", onclick: guard("callErr", () => api("/api/calls/hangup", {})) }));
+    box.append(el("div", { className: "item" },
+      el("div", {}, el("div", { className: "who", textContent: c.name || c.number || "Unknown" }),
+        el("div", { className: "sub", textContent: `${c.direction === "in" ? "Incoming" : "Outgoing"} · ${c.state}` })),
+      actions));
+  }
+}
+
+function renderSms() {
+  const box = $("sms");
+  box.replaceChildren();
+  if (!sms.length) return box.append(el("div", { className: "empty", textContent: "No messages yet. New SMS on your phone appear here." }));
+  for (const m of sms.slice(-20).reverse())
+    box.append(el("div", { className: "item" }, el("div", {},
+      el("div", { className: "who", textContent: m.type === "sms.sent" ? `To ${m.data.to}` : (m.data.name || m.data.sender) }),
+      el("div", { className: "sub", textContent: m.data.text }))));
+}
+
+async function refresh() {
+  const s = await api("/api/status");
+  const p = s.phone;
+  $("dot").classList.toggle("on", !!p.connected);
+  $("phone").textContent = p.connected ? (p.peer || "Phone connected") : "Waiting for phone";
+  renderCalls(s.calls);
+  sms = s.recent.filter((e) => e.type.startsWith("sms."));
+  renderSms();
+  $("simCard").hidden = !s.simulate.length;
+  $("sim").replaceChildren(...s.simulate.map((k) =>
+    el("button", { textContent: k.replace("_", " "), onclick: () => api(`/api/simulate/${k}`, {}) })));
+}
+
+async function join(roomName) {
+  if (room) await leave();
+  const info = await api("/api/token", { room: roomName, identity: `web-${Math.random().toString(36).slice(2, 7)}` });
+  room = new LK.Room();
+  room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind === "audio") document.body.append(track.attach());
+  });
+  room.on(LK.RoomEvent.Disconnected, () => { room = null; showLive(); refresh(); });
+  await room.connect(info.url, info.token);
+  await room.localParticipant.setMicrophoneEnabled(true);
+  showLive();
+  refresh();
+}
+
+async function leave() {
+  if (room) await room.disconnect();
+  room = null;
+  showLive();
+}
+
+function showLive() {
+  $("live").classList.toggle("on", !!room);
+  $("liveRoom").textContent = room?.name || "";
+  $("mute").textContent = room?.localParticipant.isMicrophoneEnabled === false ? "Unmute" : "Mute";
+}
+
+function meterLoop() {
+  const phone = room && [...room.remoteParticipants.values()].find((p) => p.identity === "phone");
+  $("meter").style.transform = `scaleX(${Math.min(1, (phone?.audioLevel || 0) * 4)})`;
+  requestAnimationFrame(meterLoop);
+}
+
+$("leave").onclick = leave;
+$("mute").onclick = async () => {
+  await room.localParticipant.setMicrophoneEnabled(!room.localParticipant.isMicrophoneEnabled);
+  showLive();
+};
+$("dial").onclick = guard("callErr", () => api("/api/calls", { number: $("dialTo").value }));
+$("smsSend").onclick = guard("smsErr", async () => {
+  await api("/api/sms", { to: $("smsTo").value, text: $("smsText").value });
+  $("smsText").value = "";
+});
+
+const es = new EventSource(`/api/events${KEY ? `?key=${encodeURIComponent(KEY)}` : ""}`);
+const onEvent = (e) => {
+  const ev = JSON.parse(e.data);
+  $("log").textContent = `${new Date(ev.ts * 1000).toLocaleTimeString()} ${ev.type} ${JSON.stringify(ev.data)}\n` + $("log").textContent.slice(0, 8000);
+  refresh();
+};
+for (const t of ["phone.connected","phone.disconnected","phone.status","call.ringing","call.dialing","call.active","call.ended","call.audio","room.opened","room.joined","room.left","room.closed","sms.received","sms.sent"])
+  es.addEventListener(t, onEvent);
+
+refresh().then(() => { if (params.get("room")) $("callErr").textContent = `Tap Join to enter ${params.get("room")}`; });
+meterLoop();
+</script>
+</body>
+</html>
