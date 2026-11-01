@@ -1,5 +1,7 @@
 # Agent Bluetooth
 
+![Agent Bluetooth](docs/launch/hero.png)
+
 **Turn any phone into an API — calls and SMS — over plain Bluetooth.**
 
 Pair a cheap always-on box (Raspberry Pi, Orange Pi, any Linux machine with a
