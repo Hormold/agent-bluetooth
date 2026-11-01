@@ -38,7 +38,7 @@ Inspired by @bobuk's idea of a phone as a universal Bluetooth-attached controlle
 This is a small, hackable build of it.
 
 Rough edges — use a genuine CSR8510 dongle. Code 👇
-github.com/<you>/agent-bluetooth
+github.com/Hormold/agent-bluetooth
 
 ---
 
