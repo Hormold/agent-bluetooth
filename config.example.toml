@@ -45,3 +45,40 @@ web_url = "http://raspberrypi.local:8080"   # adds a "Join the call" link
 host = "0.0.0.0"
 port = 8080
 api_key = "${AGENT_BLUETOOTH_KEY:-}"         # set it if the box is reachable from outside
+
+# ── Automations: on event X, do side-effect Y (templated with {{vars}}) ──
+# For notify / forward / auto-reply. Answering/blocking calls: use
+# [[routing.rules]] instead so the router doesn't also open a room.
+# Vars available: every event field, plus call fields (number, name, state),
+# plus any you pull out with `extract` (regex, first capture group).
+# Actions: log | shell | webhook | telegram | sms | hangup | answer | play | bridge
+
+# Forward one-time codes from any SMS to Telegram:
+# [[automations]]
+# name = "otp-to-telegram"
+# on = "sms.received"
+# extract = { code = "(\\d{4,8})" }      # literal regex, not semantic parsing
+# do = "telegram"
+# text = "🔐 {{code}} (from {{sender}})"  # reuses the telegram sink's bot_token/chat_id
+
+# Forward only bank notifications (iPhone, via the ANCS adapter when added):
+# [[automations]]
+# name = "bank-alerts"
+# on = "notification.received"
+# when = { app = "*Bank*" }
+# do = "webhook"
+# url = "https://example.com/hook"
+
+# Auto-reply to SMS while driving:
+# [[automations]]
+# name = "driving"
+# on = "sms.received"
+# do = "sms"                               # `to` defaults to the sender
+# text = "Driving, will call back. (auto)"
+
+# Run a script on a missed/ended call (vars come in as AB_* env):
+# [[automations]]
+# name = "log-call"
+# on = "call.ended"
+# do = "shell"
+# cmd = "echo \"$AB_NUMBER $AB_STATE\" >> ~/calls.log"

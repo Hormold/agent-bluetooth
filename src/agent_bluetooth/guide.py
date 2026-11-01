@@ -59,6 +59,17 @@ SMS -> ANYTHING
   agent-bluetooth watch sms | while read -r ev; do curl -XPOST ... ; done
   agent-bluetooth sms "+15551234567" "on my way"
 
+AUTOMATIONS  (config.toml, no agent needed)
+  Declarative "on event X, do Y" with {{var}} templating and regex extract.
+  Everyday recipes become config:
+    OTP relay      sms.received  + extract {code="(\d{4,8})"} -> telegram
+    notify filter  notification.received when {app="*Bank*"}  -> webhook
+    auto-reply     sms.received                               -> sms (to=sender)
+    missed call    call.ended                                 -> shell / webhook
+  Actions: log shell webhook telegram sms hangup answer play bridge.
+  Blocking/answering a call: prefer [[routing.rules]] (action=reject|play|room)
+  so the router doesn't also open a room.
+
 SWAP HARDWARE / PROTOCOLS
   Each layer is one config line (adapter = "..."): phone, messages, bridge, sinks.
   Built in: phone = fake | bumble-hfp ; messages = fake | bumble-map ;

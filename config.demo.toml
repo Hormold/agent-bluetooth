@@ -14,9 +14,35 @@ adapter = "livekit"          # LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRE
 
 [routing]
 answer = "on_join"           # auto | on_join | manual
+default = "room"
+# Call control lives in routing rules (not automations), so the router doesn't
+# also open a room. Block toll-free spam:
+[[routing.rules]]
+when_number = "+1800*"
+action = "reject"
 
 [[sinks]]
 adapter = "log"
 
 [http]
 port = 8080
+
+# ── Automations: on event X, do side-effect Y (templated with {{vars}}) ──
+# Use these for notify / forward / auto-reply. For answering/blocking a call,
+# prefer [[routing.rules]] above.
+#
+# OTP relay: pull a code out of an SMS and log it (swap do="telegram" in real use):
+[[automations]]
+name = "otp-relay"
+on = "sms.received"
+when = { text = "*" }
+extract = { code = "(\\d{4,8})" }
+do = "log"
+text = "🔐 code {{code}} from {{sender}}"
+
+# "Driving" auto-reply to any new SMS:
+[[automations]]
+name = "driving-autoreply"
+on = "sms.received"
+do = "sms"
+text = "Driving right now, will call you back. (auto)"

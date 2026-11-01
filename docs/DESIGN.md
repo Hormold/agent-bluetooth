@@ -98,6 +98,13 @@ do = "telegram"
 literal/glob only; anything needing meaning is handed to an agent or an LLM the
 user wires in, per the "we don't fake understanding" principle.
 
+**Shipped** (`core/automations.py` + `core/actions.py`): rules match `on`
+(event glob) + `when` (field globs), pull vars with `extract` (regex), template
+action params with `{{var}}`. Actions: `log shell webhook telegram sms hangup
+answer play bridge`. Verified on fake adapters: OTP extract→forward, SMS
+auto-reply, call blocking. Call control stays in `[[routing.rules]]` (so the
+router doesn't double-act); automations are for side-effects/notify/reply.
+
 ## Roadmap
 
 **Now (unblocks the demo on real hardware):**

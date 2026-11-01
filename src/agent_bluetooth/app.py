@@ -10,6 +10,8 @@ from typing import Any
 from . import registry
 from .api.http import HttpApi
 from .config import load_config
+from .core.actions import build_actions
+from .core.automations import AutomationEngine
 from .core.bus import EventBus
 from .core.context import Context
 from .core.router import CallRouter
@@ -32,6 +34,7 @@ class App:
         for sink in self.sinks:
             self.ctx.bus.subscribe(sink.handle)
         self.router = CallRouter(self.ctx, self.phone, self.bridge, config.get("routing", {}))
+        self.automations = AutomationEngine(self.ctx, build_actions(self))
         self.api = HttpApi(self, config.get("http", {}))
 
     def components(self) -> list[Any]:
