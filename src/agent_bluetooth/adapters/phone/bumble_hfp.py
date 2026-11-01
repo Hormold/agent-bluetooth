@@ -162,17 +162,23 @@ class BumbleHfpPhone:
                     if self.hf is not None:
                         break
                     try:
-                        await asyncio.wait_for(self._try_reconnect(address), timeout=8)
+                        await self._try_reconnect(address)
                     except TimeoutError:
-                        log.debug("reconnect page to %s timed out", address)
+                        log.info("reconnect to %s timed out", address)
                     except Exception as e:
-                        log.debug("reconnect to %s failed: %s", address, e)
+                        log.info("reconnect to %s failed: %s", address, e)
 
     async def _try_reconnect(self, address: str) -> None:
-        conn = await self.radio.connect(address)
+        # Short timeout only for paging (keeps the radio free to accept the
+        # phone's own reconnect); once linked, give the slow parts — auth,
+        # encryption, SDP, RFCOMM, HFP handshake — their own generous budget.
+        conn = await asyncio.wait_for(self.radio.connect(address), timeout=12)
+        await asyncio.wait_for(self._link_hfp(conn), timeout=25)
+
+    async def _link_hfp(self, conn: Connection) -> None:
         found = await hfp.find_ag_sdp_record(conn)
         if not found:
-            return
+            raise RuntimeError("phone exposes no HFP audio gateway")
         mux = await self.radio.multiplexer(conn)
         await self._setup(await mux.open_dlc(found[0]))
 
@@ -281,7 +287,7 @@ class BumbleHfpPhone:
             values = [as_int(x) for x in resp.parameters]
         except (TypeError, ValueError):
             return False
-        for state, value in zip(self.hf.ag_indicators, values):
+        for state, value in zip(self.hf.ag_indicators, values, strict=False):
             self.indicators[state.indicator.value] = value
         self._update_call_state()
         return True

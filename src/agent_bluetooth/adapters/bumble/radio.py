@@ -79,7 +79,9 @@ class BumbleRadio:
         await device.set_discoverable(bool(cfg.get("discoverable", True)))
         await device.set_connectable(True)
         log.info("radio up: %s (%s)", config.name, device.public_address)
-        return cls(device, transport)
+        radio = cls(device, transport)
+        radio._watch = asyncio.create_task(_watch_usb(spec, transport))
+        return radio
 
     def add_sdp_record(self, make: Callable[[int], list[sdp.ServiceAttribute]]) -> int:
         """`make(handle)` builds the record; the handle is embedded in it."""
@@ -158,3 +160,49 @@ class BumbleRadio:
 
     async def close(self) -> None:
         await asyncio.wait_for(self.transport.close(), 3)
+
+
+def _usb_identity(vid: int, pid: int) -> tuple[str, str] | None:
+    """(busnum, devnum) of the present VID:PID device, or None if it's gone."""
+    import glob
+
+    for d in glob.glob("/sys/bus/usb/devices/*"):
+        try:
+            with open(f"{d}/idVendor") as f:
+                if int(f.read().strip(), 16) != vid:
+                    continue
+            with open(f"{d}/idProduct") as f:
+                if int(f.read().strip(), 16) != pid:
+                    continue
+            with open(f"{d}/busnum") as f:
+                bus = f.read().strip()
+            with open(f"{d}/devnum") as f:
+                dev = f.read().strip()
+            return bus, dev
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+async def _watch_usb(spec: str, transport: Any) -> None:
+    """If the dongle is unplugged/replugged, our libusb handle is dead forever.
+    Detect it (device gone or re-enumerated with a new devnum, or the transport
+    reports termination) and exit, so systemd restarts us with a fresh handle.
+    This is what makes a physical replug just work."""
+    import os
+
+    from .usb_reset import parse_usb_ids
+
+    ids = parse_usb_ids(spec)
+    if ids is None:
+        return
+    start = _usb_identity(*ids)
+    terminated = getattr(getattr(transport, "source", None), "terminated", None)
+    while True:
+        await asyncio.sleep(3)
+        now = _usb_identity(*ids)
+        dead = terminated is not None and terminated.done()
+        if now != start or dead:
+            log.error("USB radio lost (was %s, now %s, terminated=%s); exiting for a clean restart",
+                      start, now, dead)
+            os._exit(3)
