@@ -18,8 +18,13 @@ ADAPTERS: dict[str, dict[str, str]] = {
         "fake": f"{_P}.messages.fake:FakeMessages",
         "bumble-map": f"{_P}.messages.bumble_map:BumbleMapMessages",
     },
+    "directory": {
+        "bumble-pbap": f"{_P}.directory.bumble_pbap:BumblePbapDirectory",
+    },
     "bridge": {
         "livekit": f"{_P}.bridge.livekit_room:LiveKitBridge",
+        "null": f"{_P}.bridge.null:NullBridge",
+        "record": f"{_P}.bridge.recorder:RecorderBridge",
     },
     "sink": {
         "log": f"{_P}.sinks.log:LogSink",

@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from ..core.ports import Simulator
+from ..core.settings import apply as settings_apply
+from ..core.settings import current as settings_current
 
 if TYPE_CHECKING:
     from ..app import App
@@ -41,6 +43,13 @@ class HttpApi:
         r.add_post("/api/calls/bridge", self.bridge)
         r.add_post("/api/volume", self._cmd(lambda p, b: p.set_volume(int(b["level"]))))
         r.add_post("/api/sms", self.send_sms)
+        r.add_get("/api/contacts", self.contacts)
+        r.add_get("/api/calls/history", self.history)
+        r.add_get("/api/phones", self.phones)
+        r.add_post("/api/pair", self.pair)
+        r.add_post("/api/phones/forget", self.forget_phone)
+        r.add_get("/api/settings", self.get_settings)
+        r.add_post("/api/settings", self.set_settings)
         r.add_post("/api/token", self.token)
         r.add_post("/api/simulate/{kind}", self.simulate)
         self._runner = web.AppRunner(server)
@@ -105,6 +114,53 @@ class HttpApi:
         body = await request.json()
         await self.app.messages.send(body["to"], body["text"])
         return web.json_response({"ok": True})
+
+    async def contacts(self, _: web.Request) -> web.Response:
+        if self.app.directory is None:
+            raise web.HTTPNotImplemented(text="no directory adapter configured")
+        try:
+            return web.json_response(await self.app.directory.contacts())
+        except Exception as e:
+            raise web.HTTPServiceUnavailable(text=str(e)) from e
+
+    async def history(self, _: web.Request) -> web.Response:
+        if self.app.directory is None:
+            raise web.HTTPNotImplemented(text="no directory adapter configured")
+        try:
+            return web.json_response(await self.app.directory.history())
+        except Exception as e:
+            raise web.HTTPServiceUnavailable(text=str(e)) from e
+
+    async def phones(self, _: web.Request) -> web.Response:
+        fn = getattr(self.app.phone, "phones", None)
+        if fn is None:
+            return web.json_response([])
+        return web.json_response(await fn())
+
+    async def pair(self, request: web.Request) -> web.Response:
+        fn = getattr(self.app.phone, "pair", None)
+        if fn is None:
+            raise web.HTTPNotImplemented(text="this phone adapter has no pairing")
+        body = await request.json() if request.can_read_body else {}
+        await fn(float(body.get("seconds", 120)))
+        return web.json_response({"ok": True, "discoverable": True})
+
+    async def forget_phone(self, request: web.Request) -> web.Response:
+        fn = getattr(self.app.phone, "forget", None)
+        if fn is None:
+            raise web.HTTPNotImplemented(text="this phone adapter cannot forget")
+        body = await request.json()
+        await fn(body["address"])
+        return web.json_response({"ok": True})
+
+    async def get_settings(self, _: web.Request) -> web.Response:
+        return web.json_response(settings_current(self.app))
+
+    async def set_settings(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        settings_apply(self.app, body)
+        self.app.settings.save(settings_current(self.app))
+        return web.json_response(settings_current(self.app))
 
     async def token(self, request: web.Request) -> web.Response:
         body = await request.json()

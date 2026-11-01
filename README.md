@@ -1,17 +1,30 @@
 # Agent Bluetooth
 
-Turn any phone into an API and a LiveKit room over Bluetooth. Pair a small
-device (Raspberry Pi, any Linux/macOS box with a Bluetooth dongle) to your phone
-as a hands-free kit, and you get:
+**Your phone's calls and SMS, as an API — over plain Bluetooth.**
 
-- **Incoming calls** → a LiveKit room (you or an AI agent join and talk), or a
-  played WAV, or a rule-based decision — all configurable.
-- **SMS** in and out → events you can forward anywhere (Telegram, webhook, …).
-- **One CLI** an agent drives like `agent-browser`: `watch`, `call`, `answer`,
-  `play`, `bridge`, `sms`, `sim`.
+Your SIM lives in your phone. Everything programmable lives in the cloud
+(Twilio, SIP, carrier APIs) and costs a second number no one knows. This bridges
+the gap: pair a cheap always-on box (Raspberry Pi, Orange Pi, any Linux box with
+a Bluetooth dongle) to your phone as if it were a car kit, and your *real* number
+becomes scriptable.
 
-No Twilio, no SIP trunk — the call runs on your real phone and its real number.
-It's a demo / starting point, not a product: everything is an adapter you swap.
+Leave the phone in a drawer at home and:
+
+- **Answer its calls from anywhere.** Each incoming call opens a LiveKit room —
+  join from a laptop abroad with no roaming, hand it to an AI agent, or play a
+  recording. Policy is config.
+- **Get your SMS and codes where you are.** Forward a 2FA code to Telegram, an
+  SMS to a webhook, auto-reply when you can't pick up — all declarative.
+- **Automate it.** "On event X, do Y" rules, and a CLI an agent drives like
+  `agent-browser`: `watch`, `call`, `answer`, `play`, `bridge`, `sms`.
+
+No Twilio, no SIP trunk, no second number — it runs on the phone and number you
+already have. Everything is a swappable adapter; this is a starting point to
+build on, not a finished product.
+
+> Inspired by an idea from **[Grigory Bakunov (@bobuk)](https://github.com/bobuk)**,
+> who described turning a phone into a universal Bluetooth-attached controller.
+> This is that idea built out as a small, hackable library.
 
 ## Quick start (no hardware)
 

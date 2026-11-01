@@ -33,6 +33,7 @@ class BumbleRadio:
         self.rfcomm = rfcomm.Server(device)
         self._muxes: dict[int, rfcomm.Multiplexer] = {}
         self._next_sdp_handle = 0x00010001
+        self.peer_names: dict[str, str] = {}  # address -> friendly name, learned on connect
 
     @classmethod
     async def shared(cls, ctx: Context) -> BumbleRadio:
@@ -40,11 +41,32 @@ class BumbleRadio:
 
     @classmethod
     async def open(cls, cfg: dict[str, Any]) -> BumbleRadio:
+        """Bring the radio up, retrying through a USB controller power-cycle if
+        the dongle is wedged — so it recovers on its own with no replug."""
         spec = cfg.get("transport", "usb:0")
+        # NOTE: we do NOT power-cycle the USB controller from inside the running
+        # daemon — doing so while libusb holds the device knocks the dongle off
+        # the bus and can leave a stuck (D-state) process. Controller recovery is
+        # the job of recover-usb.sh (systemd ExecStartPre), which runs when no
+        # process holds the device. Here we just retry a plain open.
+        attempts = int(cfg.get("open_attempts", 3))
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return await cls._open_once(cfg, spec)
+            except Exception as e:
+                last_error = e
+                log.warning("radio open attempt %d/%d failed: %s", attempt, attempts, e)
+                if attempt < attempts:
+                    await asyncio.sleep(2)
+        raise RuntimeError(f"could not bring up radio on {spec}") from last_error
+
+    @classmethod
+    async def _open_once(cls, cfg: dict[str, Any], spec: str) -> BumbleRadio:
         keystore = Path(cfg.get("keystore", "~/.agent-bluetooth/keys.json")).expanduser()
         keystore.parent.mkdir(parents=True, exist_ok=True)
         log.info("opening Bluetooth transport %s", spec)
-        transport = await open_transport(spec)
+        transport = await asyncio.wait_for(open_transport(spec), timeout=15)
         config = DeviceConfiguration(
             name=cfg.get("name", "Agent Bluetooth"),
             class_of_device=CLASS_HANDS_FREE,
@@ -53,7 +75,7 @@ class BumbleRadio:
             le_enabled=False,
         )
         device = Device.from_config_with_hci(config, transport.source, transport.sink)
-        await device.power_on()
+        await asyncio.wait_for(device.power_on(), timeout=15)
         await device.set_discoverable(bool(cfg.get("discoverable", True)))
         await device.set_connectable(True)
         log.info("radio up: %s (%s)", config.name, device.public_address)
@@ -83,8 +105,53 @@ class BumbleRadio:
             return []
         return [name for name, _ in await self.device.keystore.get_all()]
 
+    def connected_addresses(self) -> set[str]:
+        return {str(c.peer_address) for c in self.device.connections.values()}
+
+    async def bonded(self) -> list[dict[str, Any]]:
+        """Paired phones with name (if known) and whether they're connected now."""
+        connected = self.connected_addresses()
+        out = []
+        for address in await self.bonded_addresses():
+            out.append({
+                "address": address,
+                "name": self.peer_names.get(address, ""),
+                "connected": address in connected,
+            })
+        return out
+
+    async def forget(self, address: str) -> None:
+        for c in list(self.device.connections.values()):
+            if str(c.peer_address) == address:
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+        if self.device.keystore is not None:
+            await self.device.keystore.delete(address)
+        self.peer_names.pop(address, None)
+
+    async def set_discoverable(self, on: bool) -> None:
+        await self.device.set_discoverable(on)
+        await self.device.set_connectable(on or True)
+
+    def existing_connection(self, address: str) -> Connection | None:
+        for c in self.device.connections.values():
+            if str(c.peer_address) == address:
+                return c
+        return None
+
     async def connect(self, address: str) -> Connection:
-        connection = await self.device.connect(address, transport=BT_BR_EDR_TRANSPORT)
+        # Reuse a live ACL link if one already exists — a fresh connect would
+        # fail with CONNECTION_ALREADY_EXISTS and leave reconnect stuck.
+        if (existing := self.existing_connection(address)) is not None:
+            return existing
+        try:
+            connection = await self.device.connect(address, transport=BT_BR_EDR_TRANSPORT)
+        except Exception:
+            if (existing := self.existing_connection(address)) is not None:
+                return existing
+            raise
         await connection.authenticate()
         await connection.encrypt()
         return connection

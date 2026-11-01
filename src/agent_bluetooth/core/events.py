@@ -26,6 +26,7 @@ class E:
     ROOM_CLOSED = "room.closed"
 
     PLAYBACK_DONE = "playback.done"  # a FilePlayer clip finished: {call_id, file}
+    RECORDING_SAVED = "recording.saved"  # a call recording was written: {call_id, file, seconds}
 
     SMS_RECEIVED = "sms.received"
     SMS_SENT = "sms.sent"

@@ -34,6 +34,7 @@ class _Session:
     mixer: rtc.AudioMixer | None = None
     pipe: AudioPipe | None = None
     tasks: list[asyncio.Task] = field(default_factory=list)
+    connected: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class LiveKitBridge:
@@ -80,12 +81,26 @@ class LiveKitBridge:
                 RoomAgentDispatch(agent_name=self.agent_name, metadata=json.dumps(call.to_dict()))
             ]))
         await room.connect(self.url, token.to_jwt())
+        s.connected.set()
         log.info("call %s -> room %s", call.id, name)
         return {"room": name, "url": self.client_url}
 
     async def attach_audio(self, call: Call, audio: AudioPipe) -> None:
         s = self.sessions.get(call.id)
-        if s is None or s.pipe is audio:
+        if s is None:
+            # Audio link came up before the room; wait briefly for open() to run.
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                if (s := self.sessions.get(call.id)) is not None:
+                    break
+            if s is None:
+                return
+        if s.pipe is audio:
+            return
+        try:  # the room must be fully connected before touching local_participant
+            await asyncio.wait_for(s.connected.wait(), timeout=10)
+        except TimeoutError:
+            log.warning("room %s not connected in time; audio not attached", s.name)
             return
         await self._detach(s)
         s.pipe = audio

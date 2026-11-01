@@ -1,0 +1,179 @@
+import AVFoundation
+import Foundation
+import SwiftUI
+
+/// The app's brain: mirrors the daemon over SSE + polling, and drives calls
+/// (answer = join the call's LiveKit room; the daemon picks up on join).
+@MainActor
+final class CallCenter: ObservableObject {
+    @Published var phone = Phone(connected: false, peer: nil, call: nil, indicators: nil)
+    @Published var call: Call?
+    @Published var recents: [RecentCall] = []
+    @Published var contacts: [Contact] = []
+    @Published var history: [HistoryItem] = []
+    @Published var phones: [PairedPhone] = []
+    @Published var settings: AppSettings?
+    @Published var daemonOnline = false
+    @Published var error: String?
+
+    @Published var host: String {
+        didSet { UserDefaults.standard.set(host, forKey: "host"); reconnect() }
+    }
+    @Published var apiKey: String {
+        didSet { UserDefaults.standard.set(apiKey, forKey: "key"); reconnect() }
+    }
+
+    let live = LiveKitRoom()
+    private var api: APIClient
+    private var stream: EventStream?
+    private var poll: Timer?
+
+    init() {
+        let h = UserDefaults.standard.string(forKey: "host") ?? "http://192.168.88.71:8080"
+        let k = UserDefaults.standard.string(forKey: "key") ?? ""
+        host = h; apiKey = k
+        api = APIClient(base: URL(string: h) ?? URL(string: "http://127.0.0.1:8080")!, key: k)
+        // Ask for the mic up front so the first call can publish audio without a
+        // mid-call permission stall.
+        AVCaptureDevice.requestAccess(for: .audio) { _ in }
+        start()
+    }
+
+    private func start() {
+        reconnect()
+        poll = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { await self?.refresh() }
+        }
+    }
+
+    private func reconnect() {
+        guard let url = URL(string: host) else { return }
+        Task { await api.update(base: url, key: apiKey) }
+        stream?.stop()
+        let s = EventStream(url: { [api] in
+            // eventsURL is actor-isolated; snapshot synchronously via a helper.
+            URL(string: "\(self.host)/api/events" + (self.apiKey.isEmpty ? "" : "?key=\(self.apiKey)"))!
+        }, onEvent: { [weak self] ev in self?.handle(ev) },
+           onConnection: { [weak self] ok in self?.daemonOnline = ok })
+        s.start()
+        stream = s
+        _ = api  // silence capture note
+        Task { await refresh() }
+    }
+
+    func refresh() async {
+        do {
+            let st = try await api.status()
+            phone = st.phone
+            // Prefer calls[] — it carries the LiveKit room name; phone.call does not.
+            call = st.calls.first ?? st.phone.call
+            daemonOnline = true
+        } catch {
+            daemonOnline = false
+        }
+    }
+
+    /// Pull the directory + device state. Called when opening those screens so
+    /// we don't poll the phone needlessly.
+    func loadDirectory() {
+        Task { if let c = try? await api.contacts() { contacts = c } }
+        Task { if let h = try? await api.history() { history = h } }
+    }
+
+    func loadDeviceState() {
+        Task { if let p = try? await api.phones() { phones = p } }
+        Task { if let s = try? await api.settings() { settings = s } }
+    }
+
+    func pairNewPhone() { run { try await self.api.pair() } }
+    func forget(_ address: String) { run { try await self.api.forget(address); self.loadDeviceState() } }
+
+    func saveSettings(_ body: [String: Any]) {
+        run { self.settings = try await self.api.saveSettings(body) }
+    }
+
+    // MARK: events
+    private func handle(_ ev: Event) {
+        switch ev.type {
+        case "call.ringing", "call.dialing", "call.active":
+            if let obj = ev.data["call"]?.objectValue { call = decodeCall(obj) }
+        case "call.ended":
+            if let obj = ev.data["call"]?.objectValue { addRecent(decodeCall(obj)) }
+            call = nil
+            Task { await live.leave() }
+        case "room.opened":
+            if let r = ev.str("room") {
+                call?.room = r
+                // Outbound calls: join the room automatically so you can talk.
+                // Incoming calls wait for the Answer tap.
+                if ev.str("direction") == "out" || call?.direction == "out" {
+                    run { try await self.joinRoom(r) }
+                }
+            }
+        case "phone.connected", "phone.disconnected", "phone.status":
+            Task { await refresh() }
+        default: break
+        }
+    }
+
+    private func decodeCall(_ o: [String: JSON]) -> Call {
+        Call(id: o["id"]?.stringValue ?? "", direction: o["direction"]?.stringValue ?? "in",
+             number: o["number"]?.stringValue ?? "", name: o["name"]?.stringValue ?? "",
+             state: o["state"]?.stringValue ?? "", room: o["room"]?.stringValue)
+    }
+
+    private func addRecent(_ c: Call) {
+        guard !c.number.isEmpty || !c.name.isEmpty else { return }
+        recents.insert(RecentCall(number: c.number, name: c.name, direction: c.direction, at: Date()), at: 0)
+        recents = Array(recents.prefix(50))
+    }
+
+    // MARK: actions
+    func dial(_ number: String) {
+        let n = number.trimmingCharacters(in: .whitespaces)
+        guard !n.isEmpty else { return }
+        run { try await self.api.dial(n) }
+    }
+
+    func answer() {
+        guard let c = call else { return }
+        run {
+            let room = try await self.resolveRoom(c)
+            try await self.joinRoom(room)
+        }
+    }
+
+    /// Join a LiveKit room by name (fetch a token, connect, publish mic).
+    private func joinRoom(_ room: String) async throws {
+        guard !live.joined else { return }
+        let info = try await api.token(room: room, identity: "mac")
+        try await live.join(url: info.url, token: info.token)
+    }
+
+    func hangup() {
+        run { try await self.api.hangup(); await self.live.leave() }
+    }
+
+    func toggleMute() { Task { await live.toggleMute() } }
+
+
+    private func resolveRoom(_ c: Call) async throws -> String {
+        if let r = c.room { return r }
+        return try await roomName(for: c.id)
+    }
+
+    private func roomName(for id: String) async throws -> String {
+        for _ in 0..<10 {
+            let st = try await api.status()
+            if let r = (st.phone.call ?? st.calls.first(where: { $0.id == id }))?.room { return r }
+            try await Task.sleep(nanoseconds: 300_000_000)
+        }
+        throw NSError(domain: "AgentPhone", code: 1, userInfo: [NSLocalizedDescriptionKey: "room not ready"])
+    }
+
+    private func run(_ op: @escaping () async throws -> Void) {
+        Task {
+            do { try await op() } catch { self.error = error.localizedDescription }
+        }
+    }
+}

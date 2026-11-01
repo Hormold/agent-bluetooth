@@ -3,3 +3,8 @@ __pycache__/
 .env
 config.toml
 *.egg-info/
+
+# Swift app build artifacts (regenerated)
+apps/AgentPhone/.build/
+apps/AgentPhone/AgentPhone.xcodeproj/
+apps/AgentPhone/*.xcodeproj/

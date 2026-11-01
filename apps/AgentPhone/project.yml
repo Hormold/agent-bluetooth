@@ -1,0 +1,38 @@
+name: AgentPhone
+options:
+  bundleIdPrefix: com.agentbluetooth
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift
+    from: "2.0.3"
+targets:
+  AgentPhone:
+    type: application
+    platform: macOS
+    sources: [Sources]
+    dependencies:
+      - package: LiveKit
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: Agent Phone
+        LSMinimumSystemVersion: "14.0"
+        NSMicrophoneUsageDescription: Agent Phone needs the microphone so you can talk on calls bridged from your phone.
+        NSLocalNetworkUsageDescription: Agent Phone talks to your Agent Bluetooth box on the local network.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    entitlements:
+      path: Sources/AgentPhone.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: true

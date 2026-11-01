@@ -1,20 +1,19 @@
-"""Call routing: phone events in, actions out. All policy lives here.
+"""Call routing: phone events in, a chosen MODE applied — same options for
+incoming and outgoing calls.
 
-Each incoming call gets an ACTION, picked by the first matching rule (else the
-default):
-  room    answer and bridge audio into a LiveKit room (humans / agents join)
-  play    answer and play a WAV file into the line, then hang up
-  reject  hang up without answering
-  ignore  do nothing; an agent decides at runtime over the API
+MODES (set per direction via settings, overridable per call over the API):
+  app     audio into a LiveKit room; a human joins from the app to talk
+  agent   audio into a LiveKit room + dispatch a LiveKit agent (metadata carries
+          the call's phone number)
+  play    play a WAV file into the line
+  record  record the call audio to a WAV file
+  reject  (incoming only) hang up without answering
+  ignore  do nothing; decide later over the API
 
-ANSWER MODE applies to the `room` action only:
-  auto     pick up immediately
-  on_join  keep ringing until someone joins the room (rings out otherwise)
-  manual   never pick up by itself
-
-An agent can override any call at runtime: route_to_room() / play_file() /
-answer() / hangup() — e.g. after inspecting the number from a `call.ringing`
-event on the `watch` stream.
+For room modes (app/agent) the phone is answered when someone joins the room
+(answer="on_join") or immediately (answer="auto"). For play/record the call is
+answered at once so audio flows. Outgoing calls attach the same handler once the
+audio link is up.
 """
 
 from __future__ import annotations
@@ -24,12 +23,13 @@ import logging
 from typing import Any
 
 from ..adapters.audio.file_player import FilePlayer
+from ..adapters.bridge.recorder import RecorderBridge
 from .context import Context
 from .events import E, Event
 from .ports import AudioHandler, Bridge, Call, Phone
 
 log = logging.getLogger(__name__)
-ACTIONS = ("room", "play", "reject", "ignore")
+ROOM_MODES = ("app", "agent")
 
 
 class CallRouter:
@@ -37,14 +37,19 @@ class CallRouter:
         self.ctx = ctx
         self.bus = ctx.bus
         self.phone = phone
-        self.bridge = bridge
+        self.room_bridge = bridge  # LiveKit, used for app/agent modes
         self.answer_mode: str = cfg.get("answer", "on_join")
-        self.default_action: str = cfg.get("default", "room")
+        self.incoming_mode: str = cfg.get("incoming", cfg.get("default", "app"))
+        self.outgoing_mode: str = cfg.get("outgoing", "app")
+        self.agent_name: str = cfg.get("agent_name", "")
+        self.play_path: str = cfg.get("play_file", "")
+        self.record_dir: str = cfg.get("record_dir", "./recordings")
         self.rules: list[dict[str, Any]] = cfg.get("rules", [])
         self.hangup_on_empty: bool = bool(cfg.get("hangup_on_empty", True))
         self.calls: dict[str, Call] = {}
-        self.handlers: dict[str, AudioHandler] = {}  # audio target per call
+        self.handlers: dict[str, AudioHandler] = {}
         self.rooms: dict[str, dict[str, Any]] = {}
+        self._recorder: RecorderBridge | None = None
         self.bus.subscribe(self.on_event)
 
     # event loop ------------------------------------------------------------
@@ -54,18 +59,15 @@ class CallRouter:
         if call is None:
             return
         match event.type:
-            case E.CALL_RINGING:
-                await self._decide(call)
-            case E.CALL_DIALING:
-                self.handlers.setdefault(call.id, self.bridge)
-                await self._open_room(call)
+            case E.CALL_RINGING | E.CALL_DIALING:
+                await self._apply(call)
             case E.CALL_ACTIVE:
-                if call.id not in self.handlers:  # answered outside our policy
-                    self.handlers[call.id] = self.bridge
-                    await self._open_room(call)
+                if call.id not in self.handlers:
+                    await self._apply(call)
             case E.CALL_AUDIO if d.get("up"):
-                if (pipe := self.phone.audio()) is not None:
-                    await self.handlers.get(call.id, self.bridge).attach_audio(call, pipe)
+                handler = self.handlers.get(call.id)
+                if handler is not None and (pipe := self.phone.audio()) is not None:
+                    await handler.attach_audio(call, pipe)
             case E.CALL_ENDED:
                 await self._cleanup(call)
             case E.PLAYBACK_DONE:
@@ -79,46 +81,62 @@ class CallRouter:
                     await self.phone.hangup()
 
     # policy ----------------------------------------------------------------
-    async def _decide(self, call: Call) -> None:
-        action, params = self._match(call)
-        log.info("call %s from %s -> action=%s", call.id, call.number or "?", action)
-        match action:
-            case "reject":
-                await self.phone.hangup()
-            case "ignore":
-                pass
-            case "play":
-                await self.play_file(call, params["file"], params.get("loop", False), params.get("hangup_after", True))
-            case _:  # room
+    async def _apply(self, call: Call) -> None:
+        if call.id in self.handlers:
+            return
+        mode = self._mode_for(call)
+        log.info("call %s (%s) from %s -> mode=%s", call.id, call.direction, call.number or "?", mode)
+        if mode == "reject" and call.direction == "in":
+            await self.phone.hangup()
+            return
+        if mode == "ignore":
+            return
+        if mode in ROOM_MODES:
+            await self.route_to_room(call, agent=(mode == "agent"))
+        elif mode == "play":
+            if self.play_path:
+                await self.play_file(call, self.play_path)
+            else:
+                log.warning("play mode but no play_file set; falling back to app")
                 await self.route_to_room(call)
+        elif mode == "record":
+            await self.record(call)
 
-    def _match(self, call: Call) -> tuple[str, dict[str, Any]]:
+    def _mode_for(self, call: Call) -> str:
         for rule in self.rules:
             if call.direction != rule.get("direction", "in"):
                 continue
             pattern = rule.get("when_number")
             if pattern and not fnmatch.fnmatch(call.number or "", pattern):
                 continue
-            action = rule.get("action", "room")
-            return (action if action in ACTIONS else "room"), rule
-        return self.default_action, {}
+            return rule.get("mode", rule.get("action", "app"))
+        return self.incoming_mode if call.direction == "in" else self.outgoing_mode
 
-    # runtime overrides (API / agent) --------------------------------------
-    async def route_to_room(self, call: Call) -> dict[str, Any]:
-        self.handlers[call.id] = self.bridge
+    # handlers / runtime overrides (API + agent) ---------------------------
+    async def route_to_room(self, call: Call, agent: bool = False) -> dict[str, Any]:
+        self.room_bridge.agent_name = self.agent_name if agent else ""
+        self.handlers[call.id] = self.room_bridge
         info = await self._open_room(call)
-        if self.answer_mode == "auto" and call.state == "ringing":
-            await self.phone.answer()
-        elif call.state in ("active", "dialing") and (pipe := self.phone.audio()):
-            await self.bridge.attach_audio(call, pipe)
+        await self._answer_or_attach(call, self.room_bridge, answer_on_join=True)
         return info
 
     async def play_file(self, call: Call, path: str, loop: bool = False, hangup_after: bool = True) -> None:
-        self.handlers[call.id] = FilePlayer(self.bus, path, loop, hangup_after)
+        handler = self.handlers[call.id] = FilePlayer(self.bus, path, loop, hangup_after)
+        await self._answer_or_attach(call, handler)
+
+    async def record(self, call: Call) -> None:
+        if self._recorder is None:
+            self._recorder = RecorderBridge(self.ctx, {"dir": self.record_dir})
+        self.handlers[call.id] = self._recorder
+        await self._answer_or_attach(call, self._recorder)
+
+    async def _answer_or_attach(self, call: Call, handler: AudioHandler, answer_on_join: bool = False) -> None:
         if call.state == "ringing":
-            await self.phone.answer()
+            # room modes with on_join wait for a joiner; everything else answers now
+            if not (answer_on_join and self.answer_mode == "on_join"):
+                await self.phone.answer()
         elif (pipe := self.phone.audio()) is not None:
-            await self.handlers[call.id].attach_audio(call, pipe)
+            await handler.attach_audio(call, pipe)
 
     # helpers ---------------------------------------------------------------
     def _call(self, data: dict[str, Any]) -> Call:
@@ -133,13 +151,16 @@ class CallRouter:
     async def _open_room(self, call: Call) -> dict[str, Any]:
         if call.id in self.rooms:
             return self.rooms[call.id]
-        self.rooms[call.id] = {}  # reserve before awaiting: events race
-        info = self.rooms[call.id] = await self.bridge.open(call)
+        self.rooms[call.id] = {}
+        info = self.rooms[call.id] = await self.room_bridge.open(call)
         self.bus.publish(
             E.ROOM_OPENED, call_id=call.id, number=call.number, name=call.name,
             direction=call.direction, **info,
         )
         return info
+
+    def join_info(self, room: str, identity: str) -> dict[str, Any]:
+        return self.room_bridge.join_info(room, identity)
 
     async def _cleanup(self, call: Call) -> None:
         self.calls.pop(call.id, None)
