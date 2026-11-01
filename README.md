@@ -1,6 +1,6 @@
 # Agent Bluetooth
 
-![Agent Bluetooth](docs/launch/hero.png)
+![Agent Bluetooth](docs/launch/hero-gpt.png)
 
 **Turn any phone into an API — calls and SMS — over plain Bluetooth.**
 
