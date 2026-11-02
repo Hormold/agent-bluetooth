@@ -18,6 +18,8 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: Agent Phone
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: "14.0"
         NSMicrophoneUsageDescription: Agent Phone needs the microphone so you can talk on calls bridged from your phone.
         NSLocalNetworkUsageDescription: Agent Phone talks to your Agent Bluetooth box on the local network.

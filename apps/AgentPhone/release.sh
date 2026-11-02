@@ -34,6 +34,7 @@ xcodebuild -project AgentPhone.xcodeproj -scheme AgentPhone -configuration Relea
   CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
   OTHER_CODE_SIGN_FLAGS="--timestamp" \
   MARKETING_VERSION="$VERSION" \
+  CURRENT_PROJECT_VERSION="$(git rev-list --count HEAD)" \
   build | tail -1
 
 mkdir -p "$OUT"
