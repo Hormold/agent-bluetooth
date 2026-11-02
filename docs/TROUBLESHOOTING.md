@@ -26,7 +26,7 @@ tail) and `agent-bluetooth logs -n 200`. If `phone.radio_error` is set, its
 
 | Symptom | Fix |
 | --- | --- |
-| App: "Room not ready" | The call is in `play` / `record` mode, which opens no room. Switch to `app`. |
+| App: "Room not ready" | The call is in `play` / `stall` mode, which opens no room. Switch to `app`. |
 | App can't connect to the room (`Transport ... failed`) | LiveKit advertises an address the app can't reach. Run `livekit-server --node-ip <reachable IP>`; locally `--node-ip 127.0.0.1`. |
 | Daemon uses an old LiveKit server after moving machines | Settings saved from the app (`~/.agent-bluetooth/settings.json`) override `config.toml`. Fix it in the app (Settings > Advanced) or `agent-bluetooth settings set livekit.url=ws://127.0.0.1:7880`. |
 | Audio quality check | Use a line with continuous speech (e.g. an NWS recorded forecast, +1 716-565-0802). Talking clocks sound choppy by design. |

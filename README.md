@@ -21,6 +21,7 @@ conversation, hangs up, and saves the transcript.
 - **Calls, both ways.** Your agent places calls and answers them. Each call
   is a LiveKit room with your phone in it as a SIP participant (DTMF
   included), so anything built for LiveKit telephony works unchanged.
+- **Recording**: one switch records every call, both sides in stereo.
 - **Texts** (Android): send, list, wait for a reply.
 - **Contacts and call history**, synced from the phone.
 - **A CLI and HTTP API** that print JSON, plus a **Claude Code skill**, so a

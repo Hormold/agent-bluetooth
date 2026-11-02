@@ -233,7 +233,7 @@ def main() -> None:
     settings.add_argument(
         "values",
         nargs="*",
-        help="incoming/outgoing=app|agent|play|record|ignore; incoming=reject; agent_name, play_file, answer=auto|on_join|manual",
+        help="incoming/outgoing=app|agent|play|ignore|stall; incoming=reject; agent_name, play_file, answer=auto|on_join|manual; record_calls=true|false, record_dir=PATH",
     )
 
     c = sub.add_parser(
@@ -406,6 +406,8 @@ def main() -> None:
                     "livekit."
                 ):  # livekit.url=wss://... -> {"livekit": {"url": ...}}
                     body.setdefault("livekit", {})[key.removeprefix("livekit.")] = value
+                elif key == "record_calls":
+                    body[key] = value.lower() in ("true", "1", "yes", "on")
                 else:
                     body[key] = value
             _out(_req(args, "POST", "/api/settings", body))

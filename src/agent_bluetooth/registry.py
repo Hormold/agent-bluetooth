@@ -25,7 +25,6 @@ ADAPTERS: dict[str, dict[str, str]] = {
     "bridge": {
         "livekit": f"{_P}.bridge.livekit_room:LiveKitBridge",
         "null": f"{_P}.bridge.null:NullBridge",
-        "record": f"{_P}.bridge.recorder:RecorderBridge",
     },
     "sink": {
         "log": f"{_P}.sinks.log:LogSink",

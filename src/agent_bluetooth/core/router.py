@@ -21,11 +21,13 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import time
+from pathlib import Path
 from typing import Any
 
 from ..adapters.audio.file_player import FilePlayer
 from ..adapters.audio.stall import StallPlayer
-from ..adapters.bridge.recorder import RecorderBridge
+from ..adapters.audio.tape import CallTape
 from .context import Context
 from .events import E, Event
 from .ports import AudioHandler, Bridge, Call, Phone
@@ -57,13 +59,14 @@ class CallRouter:
             "stall_dir", ""
         )  # folder of phrases for mode=stall
         self.stall_minutes: float = float(cfg.get("stall_minutes", 5))
-        self.record_dir: str = cfg.get("record_dir", "./recordings")
+        self.record_calls: bool = bool(cfg.get("record_calls", False))
+        self.record_dir: str = cfg.get("record_dir", "~/.agent-bluetooth/recordings")
         self.rules: list[dict[str, Any]] = cfg.get("rules", [])
         self.hangup_on_empty: bool = bool(cfg.get("hangup_on_empty", True))
         self.calls: dict[str, Call] = {}
         self.handlers: dict[str, AudioHandler] = {}
         self.rooms: dict[str, dict[str, Any]] = {}
-        self._recorder: RecorderBridge | None = None
+        self.tapes: dict[str, CallTape] = {}
         self._dial: dict[str, Any] | None = None  # what the next outgoing call is for
         self.bus.subscribe(self.on_event)
 
@@ -84,8 +87,11 @@ class CallRouter:
                 if call.id not in self.handlers:
                     await self._apply(call)
             case E.CALL_AUDIO if d.get("up"):
+                pipe = self.phone.audio()
+                if pipe is not None and self.record_calls:
+                    pipe.tap = self._tape(call, pipe.sample_rate)
                 handler = self.handlers.get(call.id)
-                if handler is not None and (pipe := self.phone.audio()) is not None:
+                if handler is not None and pipe is not None:
                     await handler.attach_audio(call, pipe)
             case E.CALL_ENDED:
                 await self._cleanup(call)
@@ -160,8 +166,6 @@ class CallRouter:
             else:
                 log.warning("play mode but no play_file set; falling back to app")
                 await self.route_to_room(call)
-        elif mode == "record":
-            await self.record(call)
         elif mode == "stall":
             handler = self.handlers[call.id] = StallPlayer(
                 self.bus, stall_dir, self.stall_minutes
@@ -263,11 +267,31 @@ class CallRouter:
         )
         await self._answer_or_attach(call, handler)
 
-    async def record(self, call: Call) -> None:
-        if self._recorder is None:
-            self._recorder = RecorderBridge(self.ctx, {"dir": self.record_dir})
-        self.handlers[call.id] = self._recorder
-        await self._answer_or_attach(call, self._recorder)
+    def _tape(self, call: Call, sample_rate: int) -> CallTape:
+        """One recording per call, kept across audio links (the line can drop
+        and come back mid-call)."""
+        if tape := self.tapes.get(call.id):
+            return tape
+        digits = "".join(c for c in call.number if c.isdigit()) or "unknown"
+        name = f"{time.strftime('%Y%m%d-%H%M%S')}-{call.direction}-{digits}.wav"
+        tape = self.tapes[call.id] = CallTape(
+            Path(self.record_dir).expanduser() / name, sample_rate
+        )
+        log.info("recording call %s -> %s", call.id, tape.path)
+        return tape
+
+    def _save_tape(self, call: Call) -> None:
+        if (tape := self.tapes.pop(call.id, None)) is None:
+            return
+        tape.close()
+        log.info("saved %s (%.1fs)", tape.path, tape.seconds)
+        self.bus.publish(
+            E.RECORDING_SAVED,
+            call_id=call.id,
+            number=call.number,
+            file=str(tape.path),
+            seconds=round(tape.seconds, 1),
+        )
 
     async def _answer_or_attach(
         self, call: Call, handler: AudioHandler, answer_on_join: bool = False
@@ -311,6 +335,7 @@ class CallRouter:
 
     async def _cleanup(self, call: Call) -> None:
         self.calls.pop(call.id, None)
+        self._save_tape(call)
         handler = self.handlers.pop(call.id, None)
         if handler is not None:
             await handler.close(call)

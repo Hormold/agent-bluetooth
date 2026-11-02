@@ -45,7 +45,7 @@ Configure subsequent calls, persisted on the daemon:
   agent-bluetooth settings set incoming=ignore
 play_file must exist on the DAEMON machine: absolute path, nonempty mono/stereo
 16-bit PCM WAV. Play answers incoming calls immediately, plays once, hangs up.
-Modes: app (LiveKit room), agent (room + named dispatch), play, record, ignore;
+Modes: app (LiveKit room), agent (room + named dispatch), play, stall, ignore;
 incoming also accepts reject. app/agent require a working LiveKit bridge.
 answer=on_join waits for a room participant; auto answers immediately.
 The current router treats manual like auto for app/agent; use incoming=ignore

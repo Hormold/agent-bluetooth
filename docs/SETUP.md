@@ -88,8 +88,22 @@ Conditions: `when_contact` (true/false, from the synced phonebook), `when_number
 
 Modes: `app` (a person joins the call room), `agent` (a LiveKit agent is
 dispatched, see [LIVEKIT.md](LIVEKIT.md)), `play` (answer, play a 16-bit WAV,
-hang up), `record`, `reject`, `ignore`. The Mac app sets the same thing under
+hang up), `stall`, `reject`, `ignore`. The Mac app sets the same thing under
 Settings > When someone calls.
+
+## Recording
+
+One switch records every call, whatever handles it: both sides in a stereo
+WAV, the other party on the left, you or your agent on the right, exactly as
+the phone line carried it.
+
+```bash
+agent-bluetooth settings set record_calls=true record_dir=~/.agent-bluetooth/recordings
+```
+
+Each finished recording emits `recording.saved` with the file path. The Mac
+app has it under Settings > Recording. In some places everyone on a call has
+to agree to be recorded.
 
 ## Phones
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 FIELDS = ("incoming", "outgoing", "agent_name", "play_file", "stall_dir", "answer")
+RECORD_FIELDS = ("record_calls", "record_dir")  # global: every call, any mode
 LIVEKIT_FIELDS = ("url", "client_url", "api_key", "api_secret")
 
 
@@ -48,6 +50,8 @@ def current(app: App) -> dict[str, Any]:
         "play_file": r.play_path,
         "stall_dir": r.stall_dir,
         "answer": r.answer_mode,
+        "record_calls": r.record_calls,
+        "record_dir": r.record_dir,
     }
     b = app.bridge
     out["livekit"] = {f: getattr(b, f, "") for f in LIVEKIT_FIELDS}
@@ -66,6 +70,10 @@ def current(app: App) -> dict[str, Any]:
                 )
     if r.rules:
         descriptions.append("The first matching rule overrides the direction default.")
+    if r.record_calls:
+        descriptions.append(
+            f"Every call is recorded to {r.record_dir} (left: the other side, right: this side)."
+        )
     if r.answer_mode == "manual":
         descriptions.append(
             "answer=manual currently answers app/agent calls immediately; use incoming=ignore for manual control."
@@ -106,9 +114,6 @@ def _describe(r, mode: str, direction: str, rule: dict[str, Any] | None = None) 
     if mode == "play" and play_path:
         start = "answered automatically and " if incoming else "when connected, "
         return f"{start}{Path(play_path).name} is played, then hung up"
-    if mode == "record":
-        start = "answered automatically and " if incoming else "when connected, "
-        return f"{start}audio is recorded to {r.record_dir}"
     if mode in ("app", "agent") or (mode == "play" and not play_path):
         if not incoming:
             answer = "when connected, audio goes to a LiveKit room"
@@ -149,13 +154,17 @@ def validate_wav(path: str) -> None:
 def validate(app: App, data: dict[str, Any]) -> None:
     if not isinstance(data, dict):
         raise ValueError("Settings must be a JSON object")
-    unknown = set(data) - {*FIELDS, "livekit", "rules"}
+    unknown = set(data) - {*FIELDS, *RECORD_FIELDS, "livekit", "rules"}
     if unknown:
         raise ValueError(f"Unknown settings: {', '.join(sorted(unknown))}")
     for field in FIELDS:
         if field in data and not isinstance(data[field], str):
             raise ValueError(f"{field} must be a string")
-    modes = {"app", "agent", "play", "record", "ignore", "stall"}
+    if "record_calls" in data and not isinstance(data["record_calls"], bool):
+        raise ValueError("record_calls must be true or false")
+    if "record_dir" in data:
+        validate_record_dir(data["record_dir"])
+    modes = {"app", "agent", "play", "ignore", "stall"}
     for field in ("incoming", "outgoing"):
         allowed = modes | ({"reject"} if field == "incoming" else set())
         if field in data and data[field] not in allowed:
@@ -209,7 +218,21 @@ RULE_KEYS = {
     "play_file",
     "stall_dir",
 }
-RULE_MODES = {"app", "agent", "play", "record", "reject", "ignore", "stall"}
+RULE_MODES = {"app", "agent", "play", "reject", "ignore", "stall"}
+
+
+def validate_record_dir(folder: Any) -> None:
+    if not isinstance(folder, str) or not folder.strip():
+        raise ValueError("record_dir must be a folder path")
+    path = Path(folder).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(
+            f"Cannot create record_dir {folder!r}: {exc.strerror}"
+        ) from exc
+    if not os.access(path, os.W_OK):
+        raise ValueError(f"record_dir {folder!r} is not writable")
 
 
 def validate_stall_dir(folder: str) -> None:
@@ -229,7 +252,7 @@ def validate_stall_dir(folder: str) -> None:
 def validate_rules(rules: Any, default_play: str = "", default_stall: str = "") -> None:
     """Rules route a call by who calls. First match wins. Each rule:
     {direction: in|out|any, when_number: glob, when_contact: bool,
-     mode: app|agent|play|record|reject|ignore|stall, agent_name?, play_file?, stall_dir?}"""
+     mode: app|agent|play|reject|ignore|stall, agent_name?, play_file?, stall_dir?}"""
     if not isinstance(rules, list):
         raise ValueError("rules must be a list")
     for i, rule in enumerate(rules):
@@ -273,6 +296,10 @@ def apply(app: App, data: dict[str, Any]) -> None:
         r.stall_dir = str(data["stall_dir"])
     if "answer" in data:
         r.answer_mode = str(data["answer"])
+    if "record_calls" in data:
+        r.record_calls = bool(data["record_calls"])
+    if "record_dir" in data:
+        r.record_dir = str(data["record_dir"])
     lk = dict(data.get("livekit") or {})
     bridge = app.bridge
     # client_url (what apps connect to) usually just mirrors url. If it did,

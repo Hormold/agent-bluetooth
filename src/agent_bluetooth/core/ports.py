@@ -63,16 +63,25 @@ class AudioPipe:
         self.pushed = 0  # bytes received from the phone
         self.opened_at = time.monotonic()
         self.bridge_buffer_ms = 0.0  # set by the bridge: audio queued on its side
+        self.tap: AudioTap | None = None  # call recording, when on
 
     # phone side ------------------------------------------------------------
     def push_from_phone(self, pcm: bytes) -> None:
         self.pushed += len(pcm)
+        if self.tap:
+            self.tap.heard(pcm)
         if self._from_phone.full():
             self._from_phone.get_nowait()  # drop oldest, stay real-time
             self.dropped += 1
         self._from_phone.put_nowait(pcm)
 
     def pull_to_phone(self, nbytes: int) -> bytes:
+        out = self._next_to_phone(nbytes)
+        if self.tap:
+            self.tap.sent(out)
+        return out
+
+    def _next_to_phone(self, nbytes: int) -> bytes:
         if not self._tx_primed:
             if len(self._to_phone) < self._tx_prime:
                 return b"\x00" * nbytes  # still filling the cushion
@@ -138,6 +147,13 @@ class AudioPipe:
             del self._to_phone[:overflow]
 
 
+class AudioTap(Protocol):
+    """Sees the line audio both ways, on the phone's clock (call recording)."""
+
+    def heard(self, pcm: bytes) -> None: ...
+    def sent(self, pcm: bytes) -> None: ...
+
+
 @runtime_checkable
 class Component(Protocol):
     async def start(self) -> None: ...
@@ -166,7 +182,7 @@ class Messages(Component, Protocol):
 @runtime_checkable
 class AudioHandler(Protocol):
     """Something that consumes/produces a live call's audio: a LiveKit room, a
-    WAV player, a recorder. The router attaches exactly one per call."""
+    WAV player, stall phrases. The router attaches exactly one per call."""
 
     async def attach_audio(self, call: Call, audio: AudioPipe) -> None: ...
     async def close(self, call: Call) -> None: ...
