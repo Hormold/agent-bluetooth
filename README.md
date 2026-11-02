@@ -68,6 +68,12 @@ How the phone appears in the room: [docs/LIVEKIT.md](docs/LIVEKIT.md).
 
 ## Mac app
 
+<p>
+  <img src="docs/assets/app.png" alt="Recents" width="32%">
+  <img src="docs/assets/app-setup.png" alt="Setup checklist" width="32%">
+  <img src="docs/assets/app-settings.png" alt="Call settings" width="32%">
+</p>
+
 ```bash
 apps/AgentPhone/install.sh       # builds it and installs "Agent Phone" into /Applications
 ```
