@@ -17,13 +17,14 @@ struct SettingsView: View {
     @State private var baseline: AppSettings?  // what the box had when the form loaded
     @State private var unknown = "same"          // numbers not in contacts: same | play | stall | reject
     @State private var stallDir = ""
+    @State private var recordCalls = false
+    @State private var recordDir = ""
 
     private struct Mode { let id, title, detail, symbol: String }
     private let modes = [
         Mode(id: "app", title: "Ring in this app", detail: "You answer here. Your phone rings too.", symbol: "macwindow"),
         Mode(id: "agent", title: "Hand to an AI agent", detail: "A LiveKit agent answers in the call room.", symbol: "sparkles"),
         Mode(id: "play", title: "Play a greeting", detail: "Answers, plays your recording, hangs up.", symbol: "play.circle"),
-        Mode(id: "record", title: "Answer and record", detail: "Answers silently and saves the audio on the box.", symbol: "record.circle"),
     ]
 
     var body: some View {
@@ -49,6 +50,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     calls.disabled(baseline == nil).opacity(baseline == nil ? 0.5 : 1)
                     strangers.disabled(baseline == nil).opacity(baseline == nil ? 0.5 : 1)
+                    recording.disabled(baseline == nil).opacity(baseline == nil ? 0.5 : 1)
                     phones
                     advancedSection
                 }
@@ -59,6 +61,7 @@ struct SettingsView: View {
         .onAppear(perform: load)
         .animation(.easeOut(duration: 0.2), value: mode)
         .animation(.easeOut(duration: 0.2), value: unknown)
+        .animation(.easeOut(duration: 0.2), value: recordCalls)
     }
 
     // MARK: sections
@@ -71,7 +74,7 @@ struct SettingsView: View {
                     save()
                 }
                 if m.id == "agent" && mode == "agent" {
-                    InlineField(label: "Agent name", text: $agentName, placeholder: "phone-receptionist", onSubmit: save)
+                    InlineField(label: "Agent name", text: $agentName, placeholder: "phone-agent", onSubmit: save)
                 }
                 if m.id == "play" && mode == "play" {
                     ValueRow(symbol: "waveform", title: "Greeting",
@@ -110,6 +113,45 @@ struct SettingsView: View {
                 Text("Choose a greeting above first.").foregroundStyle(.orange)
             } else if unknown == "stall" {
                 Text("Record a few short phrases in your own voice: \u{201C}Hello?\u{201D}, \u{201C}Sorry, can you repeat that?\u{201D}")
+            }
+        }
+    }
+
+    /// The box runs on this Mac: its folders are ours to pick and open.
+    private var boxIsLocal: Bool {
+        center.host.contains("127.0.0.1") || center.host.contains("localhost")
+    }
+
+    private var recording: some View {
+        SettingsSection("Recording") {
+            ToggleRow(symbol: "record.circle", title: "Record every call",
+                      detail: "Both sides, in stereo: them on the left, you or your agent on the right.",
+                      isOn: $recordCalls)
+                .onChange(of: recordCalls) { save() }
+            if recordCalls {
+                CardDivider()
+                if boxIsLocal {
+                    ValueRow(symbol: "folder", title: "Save to",
+                             value: (recordDir as NSString).abbreviatingWithTildeInPath,
+                             action: chooseRecordFolder)
+                    Button { NSWorkspace.shared.open(URL(fileURLWithPath: (recordDir as NSString).expandingTildeInPath)) } label: {
+                        HStack(spacing: 12) {
+                            Color.clear.frame(width: 20)
+                            Text("Show recordings in Finder").font(.callout)
+                            Spacer()
+                        }
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 14).padding(.bottom, 10)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    InlineField(label: "Folder on the box", text: $recordDir, mono: true, onSubmit: save)
+                }
+            }
+        } footer: {
+            if recordCalls {
+                Text("In some places everyone on the call has to agree to be recorded.")
             }
         }
     }
@@ -184,6 +226,8 @@ struct SettingsView: View {
             mode = s.incoming; agentName = s.agent_name; playFile = s.play_file
             lkURL = s.livekit.url; lkKey = s.livekit.api_key; lkSecret = s.livekit.api_secret
             stallDir = s.stall_dir ?? ""
+            recordCalls = s.record_calls ?? false
+            recordDir = s.record_dir ?? ""
             unknown = s.rules?.first(where: \.isUnknownNumbersRule).flatMap { $0.mode ?? $0.action } ?? "same"
             baseline = s
         }
@@ -210,6 +254,19 @@ struct SettingsView: View {
         }
     }
 
+    private func chooseRecordFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = URL(fileURLWithPath: (recordDir as NSString).expandingTildeInPath)
+        panel.message = "Choose where call recordings are saved"
+        if panel.runModal() == .OK, let url = panel.url {
+            recordDir = url.path
+            save()
+        }
+    }
+
     /// Connect to the typed address only when committed (Enter / Done).
     private func applyBox() {
         let host = draftHost.trimmingCharacters(in: .whitespaces)
@@ -230,6 +287,8 @@ struct SettingsView: View {
         if playFile != s.play_file { body["play_file"] = playFile }
         let oldUnknown = s.rules?.first(where: \.isUnknownNumbersRule).flatMap { $0.mode ?? $0.action } ?? "same"
         if stallDir != (s.stall_dir ?? "") { body["stall_dir"] = stallDir }
+        if recordCalls != (s.record_calls ?? false) { body["record_calls"] = recordCalls }
+        if !recordDir.isEmpty && recordDir != (s.record_dir ?? "") { body["record_dir"] = recordDir }
         let waiting = (unknown == "play" && playFile.isEmpty) || (unknown == "stall" && stallDir.isEmpty)
         if unknown != oldUnknown && !waiting {
             var rules = (s.rules ?? []).filter { !$0.isUnknownNumbersRule }
@@ -245,6 +304,7 @@ struct SettingsView: View {
             center.saveSettings(body)
             baseline?.incoming = mode; baseline?.agent_name = agentName; baseline?.play_file = playFile
             baseline?.stall_dir = stallDir
+            baseline?.record_calls = recordCalls; baseline?.record_dir = recordDir
             baseline?.livekit.url = lkURL; baseline?.livekit.api_key = lkKey; baseline?.livekit.api_secret = lkSecret
             Task { if let fresh = await center.fetchSettings() { baseline = fresh } }  // rules + summary from the box
         }
@@ -314,6 +374,27 @@ struct RadioRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// An on/off setting; the whole row flips it.
+struct ToggleRow: View {
+    let symbol: String, title: String, detail: String
+    @Binding var isOn: Bool
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol).font(.system(size: 14)).frame(width: 20)
+                .foregroundStyle(isOn ? Color.accentColor : .secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).foregroundStyle(.primary)
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            Toggle(title, isOn: $isOn).labelsHidden().toggleStyle(.switch).controlSize(.small)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .onTapGesture { isOn.toggle() }
     }
 }
 

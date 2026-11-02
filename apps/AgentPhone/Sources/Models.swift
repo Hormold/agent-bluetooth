@@ -127,6 +127,8 @@ struct AppSettings: Decodable {
     var livekit: LiveKit
     var summary: String?  // box's plain-words description of what happens on the next call
     var rules: [CallRule]?
+    var record_calls: Bool?
+    var record_dir: String?
 }
 
 /// Server-side directory sync state (GET /api/directory).

@@ -178,7 +178,6 @@ struct BoxCard: View {
     func audio(_ bridge: String?) -> String {
         switch bridge {
         case "livekit": "LiveKit"
-        case "record": "Recorded"
         case nil: "\u{2014}"
         default: "Off"
         }
