@@ -44,6 +44,28 @@ Set `agent` mode + `agent_name` (settings or `/api/settings`). Every call opens 
 room and dispatches your registered LiveKit agent; the call's phone number
 arrives in the dispatch metadata. Your agent talks to the caller over the room.
 
+### It looks like a LiveKit SIP participant
+
+The phone joins each call room exactly like a LiveKit SIP trunk participant, so
+telephony agents and tools work unchanged:
+
+- `participant.kind == PARTICIPANT_KIND_SIP`, identity `phone`
+- attributes `sip.callID`, `sip.phoneNumber`, `sip.trunkID = agent-bluetooth`, and
+  `sip.callStatus` kept live: `dialing` / `ringing` → `active` → `hangup`
+- **DTMF:** any participant's `publish_dtmf(code=…, digit=…)` is sent to the phone
+  line (`AT+VTS`). So `send_dtmf_events`, `GetDtmfTask` and `ivr_detection` just work.
+
+```python
+@ctx.room.on("participant_attributes_changed")
+def changed(attrs, p):
+    if p.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP and attrs.get("sip.callStatus") == "active":
+        ...  # callee picked up
+await ctx.room.local_participant.publish_dtmf(code=1, digit="1")   # press 1 on the call
+```
+
+(Hearing DTMF the *remote* side presses isn't available: Bluetooth hands-free
+carries only audio, not key events.)
+
 ## Automations (no agent, in config)
 
 ```toml

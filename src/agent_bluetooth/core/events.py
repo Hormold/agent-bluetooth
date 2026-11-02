@@ -33,6 +33,7 @@ class E:
     SMS_RECEIVED = "sms.received"
     SMS_SENT = "sms.sent"
 
+    DTMF_RECEIVED = "dtmf.received"  # room participant pressed a key: {call_id, digit, code, identity}
     DIRECTORY_SYNCED = (
         "directory.synced"  # contacts/history pulled from the phone: {kind, count}
     )

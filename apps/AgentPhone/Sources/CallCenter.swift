@@ -185,12 +185,18 @@ final class CallCenter: ObservableObject {
 
     /// Join a LiveKit room by name (fetch a token, connect, publish mic).
     private func joinRoom(_ room: String) async throws {
-        guard !live.joined else { return }
+        guard !live.joined && !live.joining else { return }
         let info = try await api.token(room: room, identity: "mac")
         try await live.join(url: info.url, token: info.token)
     }
 
-    func sendDTMF(_ digit: String) { run { try await self.api.dtmf(digit) } }
+    /// In the room: native LiveKit DTMF (the box relays it to the phone, like a
+    /// SIP trunk). Not in the room: straight to the box API.
+    func sendDTMF(_ digit: String) {
+        run {
+            if self.live.joined { try await self.live.publishDTMF(digit) } else { try await self.api.dtmf(digit) }
+        }
+    }
 
     func hangup() {
         run { try await self.api.hangup(); await self.live.leave() }

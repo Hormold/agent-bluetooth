@@ -6,6 +6,7 @@ import LiveKit
 @MainActor
 final class LiveKitRoom: ObservableObject {
     @Published var joined = false
+    private(set) var joining = false  // set before any await: blocks a second join
     @Published var muted = false
     @Published var remoteLevel: Float = 0
     @Published var stats = WebRTCStats()
@@ -14,6 +15,9 @@ final class LiveKitRoom: ObservableObject {
     private var levelTimer: Timer?
 
     func join(url: String, token: String) async throws {
+        guard !joining && !joined else { return }
+        joining = true
+        defer { joining = false }
         await leave()
         let room = Room(roomOptions: RoomOptions(reportRemoteTrackStatistics: true))
         self.room = room
@@ -22,6 +26,18 @@ final class LiveKitRoom: ObservableObject {
         joined = true
         muted = false
         startLevelMeter()
+    }
+
+    /// Native LiveKit DTMF (RFC 4733 codes), the same call a SIP-aware agent makes.
+    func publishDTMF(_ digit: String) async throws {
+        guard let room else { return }
+        let code: Int
+        switch digit {
+        case "*": code = 10
+        case "#": code = 11
+        default: code = Int(digit) ?? 0
+        }
+        try await room.localParticipant.publishDtmf(code: UInt32(code), digit: digit)
     }
 
     func toggleMute() async {

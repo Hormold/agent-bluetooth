@@ -27,6 +27,12 @@ EVENTS  (agent-bluetooth watch [families...])
   sms.sent
   playback.done  {call_id, file}
   directory.synced {kind: contacts|history, count}
+  dtmf.received  {call_id, digit, code, identity}          a room participant pressed a key
+
+LIVEKIT ROOMS LOOK LIKE SIP CALLS
+  The phone is a SIP-kind participant with sip.callID / sip.phoneNumber /
+  sip.callStatus (dialing|ringing|active|hangup). publish_dtmf() from any
+  participant is dialed on the real line, so SIP-ready agents work unchanged.
 
 CONTACTS + HISTORY  (served from the box's last sync: instant)
   agent-bluetooth contacts "anna"        # filter by name or number

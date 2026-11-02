@@ -18,6 +18,7 @@ audio link is up.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import logging
 from typing import Any
@@ -74,6 +75,13 @@ class CallRouter:
                     await handler.attach_audio(call, pipe)
             case E.CALL_ENDED:
                 await self._cleanup(call)
+            case E.DTMF_RECEIVED:
+                log.info(
+                    "DTMF %s from %s -> phone line",
+                    d.get("digit"),
+                    d.get("identity") or "room",
+                )
+                await self.phone.send_dtmf(str(d.get("digit", "")))
             case E.PLAYBACK_DONE:
                 log.info("clip done on %s, hanging up", call.id)
                 await self.phone.hangup()
@@ -83,8 +91,19 @@ class CallRouter:
                 await self.phone.answer()
             case E.ROOM_LEFT if self.hangup_on_empty and d.get("others", 0) == 0:
                 if call.state in ("active", "dialing"):
-                    log.info("room for %s empty, hanging up", call.id)
-                    await self.phone.hangup()
+                    asyncio.create_task(self._hangup_if_still_empty(call))
+
+    async def _hangup_if_still_empty(self, call: Call, grace: float = 3.0) -> None:
+        """A participant reconnecting (or a duplicate identity being replaced)
+        shows up as left+joined in the same instant; only hang up if the room
+        is really still empty after a short grace period."""
+        await asyncio.sleep(grace)
+        handler = self.handlers.get(call.id)
+        count = getattr(handler, "participants", None)
+        if call.id not in self.calls or (count is not None and count(call) > 0):
+            return
+        log.info("room for %s empty, hanging up", call.id)
+        await self.phone.hangup()
 
     # policy ----------------------------------------------------------------
     async def _apply(self, call: Call) -> None:
