@@ -8,3 +8,4 @@ config.toml
 apps/AgentPhone/.build/
 apps/AgentPhone/AgentPhone.xcodeproj/
 apps/AgentPhone/*.xcodeproj/
+recordings/
