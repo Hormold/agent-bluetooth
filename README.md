@@ -58,6 +58,21 @@ Real phone: copy `config.example.toml` → `config.toml`, set your Bluetooth
 transport + LiveKit creds, pair the phone with **"Agent Bluetooth"**. See
 [docs/SETUP.md](docs/SETUP.md). Agents: run `agent-bluetooth guide`.
 
+## Recommended hardware
+
+- **Bluetooth dongle:** [TP-Link UB400](https://www.amazon.com/dp/B07V1SZCY6). Current units are a
+  Realtek RTL8761BU (USB id `2357:0604`): transport `usb:2357:0604+sco=2`, plus the
+  `rtl8761bu_fw.bin` / `rtl8761bu_config.bin` firmware in `/lib/firmware/rtl_bt/`
+  (from linux-firmware; Bumble uploads it on every start). Avoid no-name "CSR8510"
+  clones (`33fa:0001`): they wedge on call audio.
+- **Box:** any Linux SBC with 4 cores (Raspberry Pi 4/5, Orange Pi 3 LTS tested), on
+  Ethernet or 5 GHz Wi-Fi. Use the dongle, not the onboard Bluetooth: onboard
+  chips route call audio over PCM, so it never reaches the software.
+- **Phone:** any Android or iPhone; it pairs as a car kit.
+
+Setup details: [docs/SETUP.md](docs/SETUP.md) · systemd + auto-recovery:
+[docs/systemd.md](docs/systemd.md) · problems: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+
 ## Hardware note
 
 Use a **genuine CSR8510 USB dongle** (e.g. TP-Link UB400). Counterfeit CSR

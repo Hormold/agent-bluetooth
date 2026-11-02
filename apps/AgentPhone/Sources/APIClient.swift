@@ -45,6 +45,7 @@ actor APIClient {
     func dial(_ number: String) async throws { try await post("api/calls", ["number": number]) }
     func answer(callId: String?) async throws { try await post("api/calls/bridge", callId.map { ["call_id": $0] } ?? [:]) }
     func hangup() async throws { try await post("api/calls/hangup") }
+    func dtmf(_ digits: String) async throws { try await post("api/calls/dtmf", ["digits": digits]) }
     func sendSMS(to: String, text: String) async throws { try await post("api/sms", ["to": to, "text": text]) }
 
     struct JoinInfo: Decodable { let url: String; let room: String; let token: String }
@@ -54,7 +55,9 @@ actor APIClient {
     }
 
     private func get<T: Decodable>(_ path: String, _ type: T.Type) async throws -> T {
-        let (data, resp) = try await URLSession.shared.data(for: request(path))
+        var req = request(path)
+        req.timeoutInterval = 90  // PBAP pulls from the phone are slow and serialized
+        let (data, resp) = try await URLSession.shared.data(for: req)
         if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
             throw NSError(domain: "AgentPhone", code: http.statusCode,
                           userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"])
@@ -66,6 +69,10 @@ actor APIClient {
     func history() async throws -> [HistoryItem] { try await get("api/calls/history", [HistoryItem].self) }
     func phones() async throws -> [PairedPhone] { try await get("api/phones", [PairedPhone].self) }
     func settings() async throws -> AppSettings { try await get("api/settings", AppSettings.self) }
+
+    func directoryInfo() async throws -> DirectoryInfo { try await get("api/directory", DirectoryInfo.self) }
+    func syncDirectory() async throws { try await post("api/directory/sync") }
+    func box() async throws -> BoxInfo { try await get("api/debug", BoxInfo.self) }
 
     func pair() async throws { try await post("api/pair") }
     func forget(_ address: String) async throws { try await post("api/phones/forget", ["address": address]) }

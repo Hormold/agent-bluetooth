@@ -23,6 +23,10 @@ class WebhookSink:
         if self.events and event.type not in self.events:
             return
         async with aiohttp.ClientSession() as http:
-            async with http.post(self.url, json=event.to_dict(), headers=self.headers) as r:
+            async with http.post(
+                self.url, json=event.to_dict(), headers=self.headers
+            ) as r:
                 if r.status >= 400:
-                    log.warning("webhook %s -> %s %s", self.url, r.status, await r.text())
+                    log.warning(
+                        "webhook %s -> %s %s", self.url, r.status, await r.text()
+                    )

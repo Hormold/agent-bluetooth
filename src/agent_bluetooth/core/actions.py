@@ -27,10 +27,10 @@ def build_actions(app: App) -> dict[str, Action]:
         "shell": a.shell,
         "webhook": a.webhook,
         "telegram": a.telegram,
-        "sms": a.sms,          # auto-reply: `to` defaults to the sender/number
+        "sms": a.sms,  # auto-reply: `to` defaults to the sender/number
         "hangup": a.hangup,
         "answer": a.answer,
-        "play": a.play,        # needs `file`
+        "play": a.play,  # needs `file`
         "bridge": a.bridge,
     }
 
@@ -45,7 +45,9 @@ class Actions:
     async def shell(self, p: dict[str, Any], v: dict[str, str]) -> None:
         # vars exposed as AB_* env so scripts don't need to parse anything.
         env = {f"AB_{k.upper()}": val for k, val in v.items()}
-        proc = await asyncio.create_subprocess_shell(p["cmd"], env={**_os_environ(), **env})
+        proc = await asyncio.create_subprocess_shell(
+            p["cmd"], env={**_os_environ(), **env}
+        )
         await proc.wait()
 
     async def webhook(self, p: dict[str, Any], v: dict[str, str]) -> None:
@@ -60,9 +62,15 @@ class Actions:
         token = p.get("bot_token") or cfg.get("bot_token")
         chat = p.get("chat_id") or cfg.get("chat_id")
         if not token or not chat:
-            raise RuntimeError("telegram action needs bot_token+chat_id (here or in a telegram sink)")
+            raise RuntimeError(
+                "telegram action needs bot_token+chat_id (here or in a telegram sink)"
+            )
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": str(chat), "text": p.get("text", ""), "disable_web_page_preview": True}
+        payload = {
+            "chat_id": str(chat),
+            "text": p.get("text", ""),
+            "disable_web_page_preview": True,
+        }
         async with aiohttp.ClientSession() as http:
             async with http.post(url, json=payload) as r:
                 if r.status >= 400:
@@ -84,7 +92,9 @@ class Actions:
 
     async def play(self, p: dict[str, Any], v: dict[str, str]) -> None:
         call = self._call(v)
-        await self.app.router.play_file(call, p["file"], _bool(p.get("loop")), _bool(p.get("hangup_after"), True))
+        await self.app.router.play_file(
+            call, p["file"], _bool(p.get("loop")), _bool(p.get("hangup_after"), True)
+        )
 
     async def bridge(self, p: dict[str, Any], v: dict[str, str]) -> None:
         await self.app.router.route_to_room(self._call(v))
@@ -114,4 +124,5 @@ def _bool(value: Any, default: bool = False) -> bool:
 
 def _os_environ() -> dict[str, str]:
     import os
+
     return dict(os.environ)

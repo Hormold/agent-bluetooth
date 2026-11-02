@@ -93,7 +93,7 @@ private struct BatteryDot: View {
 private struct HomeView: View {
     @EnvironmentObject var center: CallCenter
     @State private var number = ""
-    @State private var tab = 0  // 0 = recents, 1 = contacts
+    @State private var tab = 0  // 0 = recents, 1 = contacts, 2 = status
 
     var body: some View {
         VStack(spacing: 12) {
@@ -111,14 +111,21 @@ private struct HomeView: View {
             Picker("", selection: $tab) {
                 Text("Recents").tag(0)
                 Text("Contacts").tag(1)
+                Text("Status").tag(2)
             }
             .pickerStyle(.segmented).labelsHidden().padding(.horizontal, 16)
 
             Group {
-                if tab == 0 { recentsList } else { contactsList }
+                switch tab {
+                case 0: recentsList
+                case 1: contactsList
+                default: StatusView()
+                }
             }
         }
         .onAppear { center.loadDirectory() }
+        .onChange(of: tab) { _, _ in center.loadDirectory() }
+        .onChange(of: center.phone.connected) { _, connected in if connected { center.loadDirectory() } }
     }
 
     @ViewBuilder private var recentsList: some View {
@@ -137,7 +144,8 @@ private struct HomeView: View {
     @ViewBuilder private var contactsList: some View {
         if center.contacts.isEmpty {
             EmptyHint(icon: "person.crop.circle", title: "No contacts",
-                      subtitle: center.phone.connected ? "Loading from your phone\u{2026}" : "Connect your phone first.")
+                      subtitle: center.directory?.syncing == "contacts" ? "Syncing from your phone\u{2026}"
+                        : (center.phone.connected ? "Not synced yet." : "Connect your phone first."))
         } else {
             List(center.contacts) { c in
                 CallRow(icon: "person.fill", tint: .secondary, title: c.name, subtitle: c.primary) { call(c.primary) }
@@ -183,21 +191,382 @@ private struct EmptyHint: View {
     }
 }
 
+// MARK: - Status
+private struct StatusView: View {
+    @EnvironmentObject var center: CallCenter
+    private let tick = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if !center.daemonOnline { OfflineCard(host: center.host) }
+                PhoneCard(phone: center.phone, online: center.daemonOnline)
+                SyncCard()
+                BoxCard(box: center.daemonOnline ? center.box : nil, radio: center.phone.radio != false)
+                ActivityList(events: center.activity.filter { ActivityRow.shows($0) })
+            }
+            .padding(16)
+        }
+        .onAppear { center.loadStatus() }
+        .onReceive(tick) { _ in center.loadStatus() }
+    }
+}
+
+private struct Card<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) { content }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.06), radius: 0.5, y: 0.5)
+            .shadow(color: .black.opacity(0.05), radius: 6, y: 2)
+    }
+}
+
+private struct CardTitle: View {
+    let text: String
+    var body: some View {
+        Text(text).font(.caption.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+    }
+}
+
+private struct OfflineCard: View {
+    let host: String
+    var body: some View {
+        Card {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange).frame(width: 18)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Can\u{2019}t reach the box").font(.headline)
+                    Text("Make sure it\u{2019}s powered on and on the same network as this Mac. Showing the last saved contacts and calls.")
+                        .font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(host).font(.caption.monospaced()).foregroundStyle(.tertiary).textSelection(.enabled)
+                }
+            }
+        }
+    }
+}
+
+private struct PhoneCard: View {
+    let phone: Phone
+    let online: Bool
+    var state: (String, Color) {
+        if !online { return ("Unknown while the box is offline", .gray) }
+        if phone.radio == false { return ("Bluetooth dongle not responding", .red) }
+        return phone.connected ? ("Connected", .green) : ("Waiting for your phone", .orange)
+    }
+
+    var body: some View {
+        Card {
+            HStack(spacing: 12) {
+                Image(systemName: "iphone")
+                    .font(.system(size: 20))
+                    .frame(width: 40, height: 40)
+                    .background(.quaternary.opacity(0.5), in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.headline)
+                    HStack(spacing: 6) {
+                        Circle().fill(state.1).frame(width: 7, height: 7)
+                        Text(state.0).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if online, phone.connected, let ind = phone.indicators {
+                    HStack(spacing: 10) {
+                        SignalBars(level: ind.signal ?? 0).accessibilityLabel("Signal \(ind.signal ?? 0) of 5")
+                        Image(systemName: battery(ind.battchg ?? 0)).foregroundStyle(.secondary)
+                            .accessibilityLabel("Battery")
+                    }
+                }
+            }
+        }
+    }
+
+    var title: String {
+        if let n = phone.name, !n.isEmpty { return n }
+        guard let p = phone.peer else { return "Phone" }
+        return "Phone \u{00B7} " + String(p.split(separator: "/").first ?? "").suffix(8)
+    }
+
+    func battery(_ level: Int) -> String {
+        switch level { case 0: "battery.0percent"; case 1...2: "battery.25percent"
+        case 3: "battery.50percent"; case 4: "battery.75percent"; default: "battery.100percent" }
+    }
+}
+
+private struct SyncCard: View {
+    @EnvironmentObject var center: CallCenter
+
+    var body: some View {
+        Card {
+            HStack {
+                CardTitle(text: "Contacts & calls")
+                Spacer()
+                if let s = center.directory?.syncing {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(s == "contacts" ? "Syncing contacts\u{2026}" : "Syncing calls\u{2026}")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .transition(.opacity)
+                }
+            }
+            row("person.2", "Contacts", "contacts")
+            row("clock.arrow.circlepath", "Recent calls", "history")
+            if let e = center.directory?.last_error {
+                Label(e, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.red).lineLimit(2)
+            }
+            Button("Sync now") { center.syncDirectory() }
+                .controlSize(.small)
+                .disabled(!center.phone.connected || center.directory?.syncing != nil)
+        }
+        .animation(.easeOut(duration: 0.2), value: center.directory?.syncing)
+    }
+
+    func row(_ icon: String, _ label: String, _ kind: String) -> some View {
+        let d = center.directory
+        let count = d?.counts[kind] ?? (kind == "contacts" ? center.contacts.count : center.history.count)
+        let synced = d?.synced_at[kind].map {
+            "Synced " + Date(timeIntervalSince1970: $0).formatted(.relative(presentation: .named))
+        } ?? (count > 0 ? "Saved on this Mac" : "Not synced yet")
+        return HStack(spacing: 10) {
+            Image(systemName: icon).foregroundStyle(.secondary).frame(width: 18)
+            Text(label)
+            Spacer()
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("\(count)").monospacedDigit().font(.body.weight(.medium))
+                Text(synced).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct BoxCard: View {
+    let box: BoxInfo?
+    let radio: Bool
+
+    var body: some View {
+        Card {
+            CardTitle(text: "Agent Bluetooth box")
+            item("dot.radiowaves.left.and.right", "Bluetooth radio",
+                 box == nil ? "\u{2014}" : (radio ? "Ready" : "Not responding"), box != nil && !radio ? .red : nil)
+            item("waveform", "Call audio", audio(box?.config.bridge), nil)
+            item("message", "Text messages", box?.config.messages == "none" || box?.config.messages == nil ? "Off" : "On", nil)
+            item("clock", "Running for", box.map { uptime($0.uptime_s) } ?? "\u{2014}", nil)
+        }
+    }
+
+    func item(_ icon: String, _ label: String, _ value: String, _ tint: Color?) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).foregroundStyle(.secondary).frame(width: 18)
+            Text(label)
+            Spacer()
+            Text(value).foregroundStyle(tint ?? .secondary).monospacedDigit()
+        }
+    }
+
+    func audio(_ bridge: String?) -> String {
+        switch bridge {
+        case "livekit": "LiveKit"
+        case "record": "Recorded"
+        case nil: "\u{2014}"
+        default: "Off"
+        }
+    }
+
+    func uptime(_ s: Int) -> String {
+        if s < 60 { return "\(s) sec" }
+        if s < 3600 { return "\(s / 60) min" }
+        if s < 86400 { return "\(s / 3600) h \(s % 3600 / 60) min" }
+        return "\(s / 86400) d \(s % 86400 / 3600) h"
+    }
+}
+
+private struct ActivityList: View {
+    let events: [Event]
+    var body: some View {
+        Card {
+            CardTitle(text: "Activity")
+            if events.isEmpty {
+                Text("Nothing yet. Calls, texts and syncs show up here.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                ForEach(events.prefix(60)) { ActivityRow(event: $0) }
+            }
+        }
+    }
+}
+
+private struct ActivityRow: View {
+    let event: Event
+
+    static func shows(_ e: Event) -> Bool {
+        !["phone.status", "call.audio", "room.closed"].contains(e.type)
+    }
+
+    var body: some View {
+        let (icon, tint, title, detail) = describe(event)
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 24, height: 24)
+                .background(tint.opacity(0.12), in: Circle())
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.subheadline.weight(.medium))
+                if !detail.isEmpty {
+                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+            }
+            Spacer()
+            Text(Date(timeIntervalSince1970: event.ts), format: .dateTime.hour().minute())
+                .font(.caption).monospacedDigit().foregroundStyle(.tertiary)
+        }
+    }
+
+    func describe(_ e: Event) -> (String, Color, String, String) {
+        let call = e.data["call"]?.objectValue
+        let who = call.map { o -> String in
+            let name = o["name"]?.stringValue ?? "", num = o["number"]?.stringValue ?? ""
+            return name.isEmpty ? num : (num.isEmpty ? name : "\(name) \u{00B7} \(num)")
+        } ?? ""
+        switch e.type {
+        case "phone.connected": return ("link", .green, "Phone connected", "")
+        case "phone.disconnected": return ("link", .orange, "Phone disconnected", "")
+        case "call.ringing": return ("phone.arrow.down.left", .green, "Incoming call", who)
+        case "call.dialing": return ("phone.arrow.up.right", .blue, "Calling", who)
+        case "call.active": return ("phone.fill", .green, "Call connected", who)
+        case "call.ended": return ("phone.down.fill", .secondary, "Call ended", who)
+        case "room.opened": return ("waveform", .blue, "Call audio ready", "")
+        case "room.joined": return ("person.fill.checkmark", .blue, "Joined the call", e.str("identity") ?? "")
+        case "room.left": return ("person.fill.xmark", .secondary, "Left the call", e.str("identity") ?? "")
+        case "sms.received": return ("message.fill", .green, "Text from \(e.str("name") ?? e.str("sender") ?? "unknown")", e.str("text") ?? "")
+        case "sms.sent": return ("paperplane.fill", .blue, "Text sent", e.str("to") ?? "")
+        case "directory.synced":
+            let n = e.str("count") ?? "0"
+            return e.str("kind") == "contacts"
+                ? ("person.2.fill", .secondary, "Contacts synced", "\(n) contacts")
+                : ("clock.arrow.circlepath", .secondary, "Recent calls synced", "\(n) calls")
+        case "playback.done": return ("play.fill", .secondary, "Finished playing", e.str("file") ?? "")
+        case "recording.saved": return ("record.circle", .red, "Call recorded", e.str("file") ?? "")
+        default: return ("circle.fill", .secondary, e.type, "")
+        }
+    }
+}
+
+// MARK: - Call stats (nerd panel)
+private struct CallStatsPanel: View {
+    let line: LineStats?
+    let rtc: WebRTCStats?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 24) {
+            column("Bluetooth", rows: lineRows)
+            column("LiveKit", rows: rtcRows)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 24)
+    }
+
+    var lineRows: [(String, String)] {
+        guard let l = line else { return [("Audio", "not on the box")] }
+        return [
+            ("Codec", "\(l.codec ?? "?") \(l.sample_rate / 1000) kHz"),
+            ("Link", l.link ?? "?"),
+            ("Delivered", String(format: "%.0f%%", l.delivered_pct)),
+            ("Dropped", "\(l.dropped)"),
+            ("Uplink buf", "\(l.bridge_buffer_ms) ms"),
+            ("To phone", "\(l.to_phone_ms) ms"),
+            ("Box load", l.box_load.map { String(format: "%.2f", $0) } ?? "\u{2014}"),
+        ]
+    }
+
+    var rtcRows: [(String, String)] {
+        guard let r = rtc else { return [("Room", "not joined")] }
+        return [
+            ("Codec", r.codec.isEmpty ? "\u{2014}" : r.codec),
+            ("RTT", String(format: "%.0f ms", r.rttMs)),
+            ("Jitter", String(format: "%.1f ms", r.jitterMs)),
+            ("Buffer", String(format: "%.0f ms", r.bufferMs)),
+            ("Loss", String(format: "%.1f%%", r.lossPct)),
+            ("Concealed", String(format: "%.1f%%", r.concealedPct)),
+            ("Bitrate", String(format: "%.0f kbps", r.kbps)),
+        ]
+    }
+
+    func column(_ title: String, rows: [(String, String)]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption2.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+            ForEach(rows, id: \.0) { row in
+                HStack(spacing: 8) {
+                    Text(row.0).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Text(row.1).monospacedDigit()
+                }
+                .font(.caption)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - DTMF keypad
+private struct DTMFPad: View {
+    @Binding var typed: String
+    let send: (String) -> Void
+    private let keys = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["*", "0", "#"]]
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Text(typed.isEmpty ? " " : typed)
+                .font(.title3.monospacedDigit()).lineLimit(1).truncationMode(.head)
+                .frame(maxWidth: .infinity)
+            ForEach(keys, id: \.self) { row in
+                HStack(spacing: 18) {
+                    ForEach(row, id: \.self) { key in
+                        Button {
+                            typed += key
+                            send(key)
+                        } label: {
+                            Text(key).font(.title2.weight(.medium)).monospacedDigit()
+                                .frame(width: 52, height: 52)
+                                .background(.quaternary.opacity(0.5), in: Circle())
+                        }
+                        .buttonStyle(PressButtonStyle())
+                        .accessibilityLabel("Key \(key)")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+    }
+}
+
 // MARK: - Active / incoming call
 private struct CallView: View {
     @EnvironmentObject var center: CallCenter
     let call: Call
     @State private var started = Date()
+    @State private var panel: CallPanel = .none
+    @State private var typed = ""
+
+    enum CallPanel { case none, stats, keypad }
 
     var ringingIncoming: Bool { call.incoming && call.state == "ringing" }
 
+    func toggle(_ p: CallPanel) { panel = panel == p ? .none : p }
+
     var body: some View {
-        VStack(spacing: 22) {
-            Spacer()
+        VStack(spacing: panel == .none ? 22 : 14) {
+            Spacer(minLength: 8)
             Circle()
                 .fill(.quaternary.opacity(0.5))
-                .frame(width: 96, height: 96)
-                .overlay(Text(initials(call.display)).font(.system(size: 34, weight: .medium)))
+                .frame(width: panel == .none ? 96 : 56, height: panel == .none ? 96 : 56)
+                .overlay(Text(initials(call.display))
+                    .font(.system(size: panel == .none ? 34 : 20, weight: .medium)))
                 .overlay(Circle().stroke(.green.opacity(ringingIncoming ? 0.6 : 0), lineWidth: 3)
                     .scaleEffect(ringingIncoming ? 1.15 : 1)
                     .opacity(ringingIncoming ? 0 : 1)
@@ -211,8 +580,20 @@ private struct CallView: View {
 
             if center.live.joined {
                 LevelMeter(level: center.live.remoteLevel).frame(height: 4).padding(.horizontal, 60)
+                    .accessibilityLabel("Caller audio level")
             }
-            Spacer()
+            Group {
+                switch panel {
+                case .stats:
+                    CallStatsPanel(line: center.phone.audio_stats, rtc: center.live.joined ? center.live.stats : nil)
+                case .keypad:
+                    DTMFPad(typed: $typed) { center.sendDTMF($0) }
+                case .none:
+                    EmptyView()
+                }
+            }
+            .transition(.opacity.combined(with: .offset(y: -4)))
+            Spacer(minLength: 8)
 
             if ringingIncoming {
                 HStack(spacing: 40) {
@@ -220,9 +601,13 @@ private struct CallView: View {
                     RoundIconButton(symbol: "phone.fill", tint: .green) { center.answer() }
                 }
             } else {
-                HStack(spacing: 40) {
+                HStack(spacing: 28) {
                     RoundIconButton(symbol: center.live.muted ? "mic.slash.fill" : "mic.fill",
                                     tint: center.live.muted ? .orange : .secondary, filled: false) { center.toggleMute() }
+                        .accessibilityLabel(center.live.muted ? "Unmute" : "Mute")
+                    RoundIconButton(symbol: "circle.grid.3x3.fill", tint: panel == .keypad ? .accentColor : .secondary,
+                                    filled: false) { toggle(.keypad) }
+                        .accessibilityLabel("Keypad")
                     RoundIconButton(symbol: "phone.down.fill", tint: .red) { center.hangup() }
                     if !center.live.joined {
                         RoundIconButton(symbol: "waveform", tint: .green, filled: false) { center.answer() }
@@ -232,7 +617,18 @@ private struct CallView: View {
             Spacer().frame(height: 24)
         }
         .padding()
+        .animation(.easeOut(duration: 0.2), value: panel)
+        .toolbar {
+            Button { toggle(.stats) } label: { Image(systemName: "chart.bar.xaxis") }
+                .help("Call stats").accessibilityLabel("Call stats")
+        }
         .onChange(of: call.state) { _, new in if new == "active" { started = Date() } }
+        .task {  // live line stats while the call screen is up
+            while !Task.isCancelled {
+                await center.refresh()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
     }
 
     var subtitle: String {

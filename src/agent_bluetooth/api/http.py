@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +30,9 @@ class HttpApi:
         self.port = int(cfg.get("port", 8080))
         self.api_key = cfg.get("api_key", "")
         self._runner: web.AppRunner | None = None
+        self.started_at = time.time()
+        self.logs = _RingLog()
+        logging.getLogger().addHandler(self.logs)
 
     async def start(self) -> None:
         server = web.Application(middlewares=[self._auth])
@@ -45,6 +50,9 @@ class HttpApi:
         r.add_post("/api/sms", self.send_sms)
         r.add_get("/api/contacts", self.contacts)
         r.add_get("/api/calls/history", self.history)
+        r.add_get("/api/directory", self.directory_info)
+        r.add_post("/api/directory/sync", self.directory_sync)
+        r.add_get("/api/debug", self.debug)
         r.add_get("/api/phones", self.phones)
         r.add_post("/api/pair", self.pair)
         r.add_post("/api/phones/forget", self.forget_phone)
@@ -67,7 +75,12 @@ class HttpApi:
             given = request.headers.get("Authorization", "").removeprefix("Bearer ")
             if (given or request.query.get("key")) != self.api_key:
                 raise web.HTTPUnauthorized(text="bad api key")
-        return await handler(request)
+        try:
+            return await handler(request)
+        except RuntimeError as e:
+            # Adapters raise RuntimeError for "not right now" (phone not connected):
+            # that's a 503 the client can show, not a server crash.
+            raise web.HTTPServiceUnavailable(text=str(e)) from e
 
     # handlers --------------------------------------------------------------
     async def status(self, _: web.Request) -> web.Response:
@@ -76,30 +89,40 @@ class HttpApi:
             {**c.to_dict(), "room": router.rooms.get(c.id, {}).get("room")}
             for c in router.calls.values()
         ]
-        return web.json_response({
-            "phone": self.app.phone.status(),
-            "messages": self.app.config.get("messages", {}).get("adapter", "none"),
-            "calls": calls,
-            "simulate": sorted(k for c in self._simulators() for k in c.simulates),
-            "recent": [e.to_dict() for e in self.app.ctx.bus.history][-50:],
-        })
+        return web.json_response(
+            {
+                "phone": self.app.phone.status(),
+                "messages": self.app.config.get("messages", {}).get("adapter", "none"),
+                "calls": calls,
+                "simulate": sorted(k for c in self._simulators() for k in c.simulates),
+                "recent": [e.to_dict() for e in self.app.ctx.bus.history][-50:],
+            }
+        )
 
     async def events(self, request: web.Request) -> web.StreamResponse:
-        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+        resp = web.StreamResponse(
+            headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
+        )
         await resp.prepare(request)
         async for event in self.app.ctx.bus.stream():
-            await resp.write(f"event: {event.type}\ndata: {json.dumps(event.to_dict())}\n\n".encode())
+            await resp.write(
+                f"event: {event.type}\ndata: {json.dumps(event.to_dict())}\n\n".encode()
+            )
         return resp
 
     async def dial(self, request: web.Request) -> web.Response:
         body = await request.json()
+        if not self.app.phone.status().get("connected"):
+            raise web.HTTPServiceUnavailable(text="phone not connected")
         asyncio.create_task(self.app.phone.dial(body["number"]))
         return web.json_response({"ok": True})
 
     async def play(self, request: web.Request) -> web.Response:
         body = await request.json()
         call = self._active_call(body.get("call_id"))
-        await self.app.router.play_file(call, body["file"], body.get("loop", False), body.get("hangup_after", True))
+        await self.app.router.play_file(
+            call, body["file"], body.get("loop", False), body.get("hangup_after", True)
+        )
         return web.json_response({"ok": True, "call_id": call.id})
 
     async def bridge(self, request: web.Request) -> web.Response:
@@ -115,21 +138,44 @@ class HttpApi:
         await self.app.messages.send(body["to"], body["text"])
         return web.json_response({"ok": True})
 
-    async def contacts(self, _: web.Request) -> web.Response:
+    def _directory(self):
         if self.app.directory is None:
             raise web.HTTPNotImplemented(text="no directory adapter configured")
-        try:
-            return web.json_response(await self.app.directory.contacts())
-        except Exception as e:
-            raise web.HTTPServiceUnavailable(text=str(e)) from e
+        return self.app.directory
+
+    async def contacts(self, _: web.Request) -> web.Response:
+        return web.json_response(await self._directory().contacts())
 
     async def history(self, _: web.Request) -> web.Response:
-        if self.app.directory is None:
-            raise web.HTTPNotImplemented(text="no directory adapter configured")
-        try:
-            return web.json_response(await self.app.directory.history())
-        except Exception as e:
-            raise web.HTTPServiceUnavailable(text=str(e)) from e
+        return web.json_response(await self._directory().history())
+
+    async def directory_info(self, _: web.Request) -> web.Response:
+        return web.json_response(self._directory().info())
+
+    async def directory_sync(self, _: web.Request) -> web.Response:
+        self._directory().sync()
+        return web.json_response({"ok": True, **self._directory().info()})
+
+    async def debug(self, _: web.Request) -> web.Response:
+        """Everything useful for troubleshooting, in one call."""
+        info = getattr(self.app.directory, "info", None)
+        return web.json_response(
+            {
+                "uptime_s": round(time.time() - self.started_at),
+                "phone": self.app.phone.status(),
+                "directory": info() if info else None,
+                "config": {
+                    "transport": self.app.config.get("bluetooth", {}).get("transport"),
+                    "bridge": self.app.config.get("bridge", {}).get("adapter"),
+                    "messages": self.app.config.get("messages", {}).get("adapter"),
+                },
+                "calls": [c.to_dict() for c in self.app.router.calls.values()],
+                "rooms": self.app.router.rooms,
+                "events": [e.to_dict() for e in self.app.ctx.bus.history],
+                "logs": list(self.logs.lines),
+            },
+            dumps=lambda o: json.dumps(o, default=str),
+        )
 
     async def phones(self, _: web.Request) -> web.Response:
         fn = getattr(self.app.phone, "phones", None)
@@ -164,7 +210,9 @@ class HttpApi:
 
     async def token(self, request: web.Request) -> web.Response:
         body = await request.json()
-        return web.json_response(self.app.bridge.join_info(body["room"], body.get("identity", "web-user")))
+        return web.json_response(
+            self.app.bridge.join_info(body["room"], body.get("identity", "web-user"))
+        )
 
     async def simulate(self, request: web.Request) -> web.Response:
         kind = request.match_info["kind"]
@@ -187,11 +235,36 @@ class HttpApi:
         return next(iter(calls.values()))
 
     def _simulators(self) -> list[Any]:
-        return [c for c in self.app.components() if isinstance(c, Simulator) and hasattr(c, "simulates")]
+        return [
+            c
+            for c in self.app.components()
+            if isinstance(c, Simulator) and hasattr(c, "simulates")
+        ]
 
     def _cmd(self, fn):
         async def handler(request: web.Request) -> web.Response:
             body = await request.json() if request.can_read_body else {}
             await fn(self.app.phone, body)
             return web.json_response({"ok": True})
+
         return handler
+
+
+class _RingLog(logging.Handler):
+    """Last N log lines (INFO+) for GET /api/debug, so an agent can see what
+    went wrong without SSH access to the box."""
+
+    def __init__(self, size: int = 500) -> None:
+        super().__init__(logging.INFO)
+        self.lines: deque[str] = deque(maxlen=size)
+        self.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname).1s %(name)s: %(message)s")
+        )
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.name == "aiohttp.access":
+            return
+        try:
+            self.lines.append(self.format(record))
+        except Exception:
+            pass

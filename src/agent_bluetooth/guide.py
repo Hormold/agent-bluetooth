@@ -26,6 +26,17 @@ EVENTS  (agent-bluetooth watch [families...])
   sms.received   {id, sender, name, text, datetime}
   sms.sent
   playback.done  {call_id, file}
+  directory.synced {kind: contacts|history, count}
+
+CONTACTS + HISTORY  (served from the box's last sync: instant)
+  agent-bluetooth contacts "anna"        # filter by name or number
+  agent-bluetooth history
+  agent-bluetooth sync                   # pull again from the phone
+
+WHEN SOMETHING IS WRONG  (start here, no SSH needed)
+  agent-bluetooth debug                  # phone, radio, sync state, calls, events, logs
+  agent-bluetooth logs -n 200            # daemon log tail
+  Known problems and fixes: docs/TROUBLESHOOTING.md
 
 REACT TO AN INCOMING CALL  (answer=manual in config, or override any policy)
   agent-bluetooth watch call | while read -r ev; do

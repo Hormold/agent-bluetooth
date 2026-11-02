@@ -29,19 +29,25 @@ class App:
         self.phone = registry.build("phone", config["phone"], self.ctx)
         msg_cfg = config.get("messages", {"adapter": "none"})
         self.messages = (
-            None if msg_cfg.get("adapter") == "none"
+            None
+            if msg_cfg.get("adapter") == "none"
             else registry.build("messages", msg_cfg, self.ctx)
         )
         dir_cfg = config.get("directory", {"adapter": "none"})
         self.directory = (
-            None if dir_cfg.get("adapter", "none") == "none"
+            None
+            if dir_cfg.get("adapter", "none") == "none"
             else registry.build("directory", dir_cfg, self.ctx)
         )
         self.bridge = registry.build("bridge", config["bridge"], self.ctx)
-        self.sinks = [registry.build("sink", s, self.ctx) for s in config.get("sinks", [])]
+        self.sinks = [
+            registry.build("sink", s, self.ctx) for s in config.get("sinks", [])
+        ]
         for sink in self.sinks:
             self.ctx.bus.subscribe(sink.handle)
-        self.router = CallRouter(self.ctx, self.phone, self.bridge, config.get("routing", {}))
+        self.router = CallRouter(
+            self.ctx, self.phone, self.bridge, config.get("routing", {})
+        )
         self.settings = SettingsStore(
             config.get("settings_file", "~/.agent-bluetooth/settings.json")
         )
@@ -52,7 +58,11 @@ class App:
         self.api = HttpApi(self, config.get("http", {}))
 
     def components(self) -> list[Any]:
-        return [c for c in (self.bridge, self.phone, self.messages, self.directory) if c is not None]
+        return [
+            c
+            for c in (self.bridge, self.phone, self.messages, self.directory)
+            if c is not None
+        ]
 
     async def run(self) -> None:
         # Liveness is decoupled from the radio: the API + watchdog come up first
@@ -110,11 +120,18 @@ def run_config(config_path: str, verbose: bool = False) -> None:
     # that's thousands of lines/sec — it pegs the CPU and journald on a small
     # SBC and starves the event loop, dropping the very call it's logging. Keep
     # these at INFO even under -v; our own loggers still honour verbose.
-    for noisy in ("bumble.host", "bumble.transport.usb", "bumble.hci", "bumble.rfcomm", "bumble.l2cap"):
+    for noisy in (
+        "bumble.host",
+        "bumble.transport.usb",
+        "bumble.hci",
+        "bumble.rfcomm",
+        "bumble.l2cap",
+    ):
         logging.getLogger(noisy).setLevel(logging.INFO)
     asyncio.run(App(load_config(config_path)).run())
 
 
 if __name__ == "__main__":
     import sys
+
     run_config(sys.argv[1] if len(sys.argv) > 1 else "config.toml", "-v" in sys.argv)

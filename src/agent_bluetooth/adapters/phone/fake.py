@@ -28,7 +28,9 @@ class FakePhone:
         self.rx_level = 0.0  # loudness of audio the room sends to the "phone"
 
     async def start(self) -> None:
-        self.bus.publish(E.PHONE_CONNECTED, name="Fake Phone", address="00:00:00:00:00:00")
+        self.bus.publish(
+            E.PHONE_CONNECTED, name="Fake Phone", address="00:00:00:00:00:00"
+        )
 
     async def stop(self) -> None:
         await self._end()
@@ -66,7 +68,9 @@ class FakePhone:
         self.bus.publish(E.PHONE_STATUS, speaker_volume=level)
 
     # dev -------------------------------------------------------------------
-    async def simulate(self, kind: str, number: str = "+15551234567", name: str = "", **_: Any) -> None:
+    async def simulate(
+        self, kind: str, number: str = "+15551234567", name: str = "", **_: Any
+    ) -> None:
         if kind == "call":
             self.call = Call(direction="in", number=number, name=name)
             self.bus.publish(E.CALL_RINGING, call=self.call.to_dict())
@@ -80,7 +84,12 @@ class FakePhone:
         self.bus.publish(E.CALL_ACTIVE, call=self.call.to_dict())
         self.pipe = AudioPipe(self.sample_rate)
         self._audio_task = asyncio.create_task(self._audio_loop(self.pipe))
-        self.bus.publish(E.CALL_AUDIO, call=self.call.to_dict(), up=True, sample_rate=self.sample_rate)
+        self.bus.publish(
+            E.CALL_AUDIO,
+            call=self.call.to_dict(),
+            up=True,
+            sample_rate=self.sample_rate,
+        )
 
     async def _end(self) -> None:
         if self._audio_task:

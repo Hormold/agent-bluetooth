@@ -11,6 +11,9 @@ final class CallCenter: ObservableObject {
     @Published var recents: [RecentCall] = []
     @Published var contacts: [Contact] = []
     @Published var history: [HistoryItem] = []
+    @Published var directory: DirectoryInfo?
+    @Published var box: BoxInfo?
+    @Published var activity: [Event] = []
     @Published var phones: [PairedPhone] = []
     @Published var settings: AppSettings?
     @Published var daemonOnline = false
@@ -36,6 +39,7 @@ final class CallCenter: ObservableObject {
         // Ask for the mic up front so the first call can publish audio without a
         // mid-call permission stall.
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
+        if let snap = DirectorySnapshot.load() { contacts = snap.contacts; history = snap.history }
         start()
     }
 
@@ -76,8 +80,40 @@ final class CallCenter: ObservableObject {
     /// Pull the directory + device state. Called when opening those screens so
     /// we don't poll the phone needlessly.
     func loadDirectory() {
-        Task { if let c = try? await api.contacts() { contacts = c } }
-        Task { if let h = try? await api.history() { history = h } }
+        // The box serves its last sync instantly; we keep a local copy too so a
+        // relaunch shows the list before the network answers.
+        Task {
+            async let c = try? api.contacts()
+            async let h = try? api.history()
+            async let i = try? api.directoryInfo()
+            let (contacts, history, info) = await (c, h, i)
+            if let contacts { self.contacts = contacts }
+            if let history { self.history = history }
+            if let info { directory = info }
+            if contacts != nil || history != nil {
+                DirectorySnapshot(contacts: self.contacts, history: self.history).save()
+            }
+        }
+    }
+
+    func syncDirectory() {
+        run {
+            try await self.api.syncDirectory()
+            self.directory = try? await self.api.directoryInfo()
+        }
+    }
+
+    /// Status tab: box + phone + sync state, and the recent event history.
+    func loadStatus() {
+        Task {
+            async let b = try? api.box()
+            async let d = try? api.directoryInfo()
+            async let s = try? api.status()
+            let (box, dir, st) = await (b, d, s)
+            if let box { self.box = box }
+            if let dir { directory = dir }
+            if let st { phone = st.phone; activity = st.recent.reversed() }
+        }
     }
 
     func loadDeviceState() {
@@ -94,6 +130,8 @@ final class CallCenter: ObservableObject {
 
     // MARK: events
     private func handle(_ ev: Event) {
+        activity.insert(ev, at: 0)
+        if activity.count > 200 { activity.removeLast(activity.count - 200) }
         switch ev.type {
         case "call.ringing", "call.dialing", "call.active":
             if let obj = ev.data["call"]?.objectValue { call = decodeCall(obj) }
@@ -112,6 +150,8 @@ final class CallCenter: ObservableObject {
             }
         case "phone.connected", "phone.disconnected", "phone.status":
             Task { await refresh() }
+        case "directory.synced":
+            loadDirectory()
         default: break
         }
     }
@@ -149,6 +189,8 @@ final class CallCenter: ObservableObject {
         let info = try await api.token(room: room, identity: "mac")
         try await live.join(url: info.url, token: info.token)
     }
+
+    func sendDTMF(_ digit: String) { run { try await self.api.dtmf(digit) } }
 
     func hangup() {
         run { try await self.api.hangup(); await self.live.leave() }

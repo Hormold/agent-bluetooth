@@ -39,6 +39,8 @@ def build(kind: str, cfg: dict[str, Any], ctx: Context) -> Any:
     target = ADAPTERS[kind].get(name, name)
     if ":" not in target:
         known = ", ".join(ADAPTERS[kind])
-        raise ValueError(f"unknown {kind} adapter {name!r} (known: {known}, or module:Class)")
+        raise ValueError(
+            f"unknown {kind} adapter {name!r} (known: {known}, or module:Class)"
+        )
     module, cls = target.split(":", 1)
     return getattr(importlib.import_module(module), cls)(ctx, cfg)

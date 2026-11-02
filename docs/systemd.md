@@ -21,7 +21,7 @@ TimeoutStopSec=10
 KillMode=mixed
 WorkingDirectory=/root/agent-bluetooth
 Environment=PATH=/root/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-ExecStartPre=/root/agent-bluetooth/recover-usb.sh
+ExecStartPre=/root/agent-bluetooth/deploy/recover-usb.sh
 ExecStart=/root/.local/bin/uv run agent-bluetooth serve config.toml
 Restart=always
 RestartSec=2

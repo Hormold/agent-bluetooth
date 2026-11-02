@@ -21,7 +21,9 @@ FRAME_MS = 20
 
 
 class FilePlayer:
-    def __init__(self, bus: EventBus, path: str, loop: bool = False, hangup_after: bool = True) -> None:
+    def __init__(
+        self, bus: EventBus, path: str, loop: bool = False, hangup_after: bool = True
+    ) -> None:
         self.bus = bus
         self.path = path
         self.loop = loop
@@ -50,7 +52,13 @@ class FilePlayer:
                 await asyncio.sleep(max(0, next_at - loop.time()))
             if not self.loop:
                 break
-        self.bus.publish(E.CALL_AUDIO, call=call.to_dict(), up=True, sample_rate=audio.sample_rate, played=self.path)
+        self.bus.publish(
+            E.CALL_AUDIO,
+            call=call.to_dict(),
+            up=True,
+            sample_rate=audio.sample_rate,
+            played=self.path,
+        )
         if self.hangup_after:
             self.bus.publish(E.PLAYBACK_DONE, call_id=call.id, file=self.path)
 
@@ -58,13 +66,19 @@ class FilePlayer:
 def _load_wav(path: str, target_rate: int) -> bytes:
     with wave.open(path, "rb") as w:
         if w.getsampwidth() != PCM_BYTES_PER_SAMPLE:
-            raise ValueError(f"{path}: need 16-bit PCM WAV, got {w.getsampwidth() * 8}-bit")
+            raise ValueError(
+                f"{path}: need 16-bit PCM WAV, got {w.getsampwidth() * 8}-bit"
+            )
         channels, rate = w.getnchannels(), w.getframerate()
         samples = array.array("h", w.readframes(w.getnframes()))
     if channels > 1:  # downmix to mono
-        samples = array.array("h", (
-            sum(samples[i : i + channels]) // channels for i in range(0, len(samples), channels)
-        ))
+        samples = array.array(
+            "h",
+            (
+                sum(samples[i : i + channels]) // channels
+                for i in range(0, len(samples), channels)
+            ),
+        )
     if rate != target_rate:  # linear resample
         samples = _resample(samples, rate, target_rate)
     return samples.tobytes()

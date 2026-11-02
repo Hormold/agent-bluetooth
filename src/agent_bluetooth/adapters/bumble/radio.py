@@ -21,9 +21,12 @@ from bumble.device import Connection, Device, DeviceConfiguration
 from bumble.transport import open_transport
 
 from ...core.context import Context
+from . import usb_sink
 
 log = logging.getLogger(__name__)
-CLASS_HANDS_FREE = 0x240408  # services: Audio + Rendering; device: Audio/Video, Hands-free
+CLASS_HANDS_FREE = (
+    0x240408  # services: Audio + Rendering; device: Audio/Video, Hands-free
+)
 
 
 class BumbleRadio:
@@ -33,11 +36,15 @@ class BumbleRadio:
         self.rfcomm = rfcomm.Server(device)
         self._muxes: dict[int, rfcomm.Multiplexer] = {}
         self._next_sdp_handle = 0x00010001
-        self.peer_names: dict[str, str] = {}  # address -> friendly name, learned on connect
+        self.peer_names: dict[
+            str, str
+        ] = {}  # address -> friendly name, learned on connect
 
     @classmethod
     async def shared(cls, ctx: Context) -> BumbleRadio:
-        return await ctx.resource("bumble", lambda: cls.open(ctx.config.get("bluetooth", {})))
+        return await ctx.resource(
+            "bumble", lambda: cls.open(ctx.config.get("bluetooth", {}))
+        )
 
     @classmethod
     async def open(cls, cfg: dict[str, Any]) -> BumbleRadio:
@@ -63,9 +70,12 @@ class BumbleRadio:
 
     @classmethod
     async def _open_once(cls, cfg: dict[str, Any], spec: str) -> BumbleRadio:
-        keystore = Path(cfg.get("keystore", "~/.agent-bluetooth/keys.json")).expanduser()
+        keystore = Path(
+            cfg.get("keystore", "~/.agent-bluetooth/keys.json")
+        ).expanduser()
         keystore.parent.mkdir(parents=True, exist_ok=True)
         log.info("opening Bluetooth transport %s", spec)
+        usb_sink.install()  # SCO gets its own USB lane (see usb_sink.py)
         transport = await asyncio.wait_for(open_transport(spec), timeout=15)
         config = DeviceConfiguration(
             name=cfg.get("name", "Agent Bluetooth"),
@@ -74,10 +84,20 @@ class BumbleRadio:
             classic_enabled=True,
             le_enabled=False,
         )
-        device = Device.from_config_with_hci(config, transport.source, transport.sink)
-        await asyncio.wait_for(device.power_on(), timeout=15)
-        await device.set_discoverable(bool(cfg.get("discoverable", True)))
-        await device.set_connectable(True)
+        try:
+            device = Device.from_config_with_hci(
+                config, transport.source, transport.sink
+            )
+            await asyncio.wait_for(device.power_on(), timeout=15)
+            await device.set_discoverable(bool(cfg.get("discoverable", True)))
+            await device.set_connectable(True)
+        except BaseException:
+            # Release the USB claim, or every retry in this process gets BUSY.
+            try:
+                await asyncio.wait_for(transport.close(), timeout=3)
+            except Exception:
+                pass
+            raise
         log.info("radio up: %s (%s)", config.name, device.public_address)
         radio = cls(device, transport)
         radio._watch = asyncio.create_task(_watch_usb(spec, transport))
@@ -87,12 +107,18 @@ class BumbleRadio:
         """`make(handle)` builds the record; the handle is embedded in it."""
         handle = self._next_sdp_handle
         self._next_sdp_handle += 1
-        self.device.sdp_service_records = {**self.device.sdp_service_records, handle: make(handle)}
+        self.device.sdp_service_records = {
+            **self.device.sdp_service_records,
+            handle: make(handle),
+        }
         return handle
 
     def remember_mux(self, connection: Connection, mux: rfcomm.Multiplexer) -> None:
         self._muxes[connection.handle] = mux
-        connection.on(connection.EVENT_DISCONNECTION, lambda *_: self._muxes.pop(connection.handle, None))
+        connection.on(
+            connection.EVENT_DISCONNECTION,
+            lambda *_: self._muxes.pop(connection.handle, None),
+        )
 
     async def multiplexer(self, connection: Connection) -> rfcomm.Multiplexer:
         """RFCOMM session to the phone: reuse the one HFP opened, else start one."""
@@ -115,11 +141,13 @@ class BumbleRadio:
         connected = self.connected_addresses()
         out = []
         for address in await self.bonded_addresses():
-            out.append({
-                "address": address,
-                "name": self.peer_names.get(address, ""),
-                "connected": address in connected,
-            })
+            out.append(
+                {
+                    "address": address,
+                    "name": self.peer_names.get(address, ""),
+                    "connected": address in connected,
+                }
+            )
         return out
 
     async def forget(self, address: str) -> None:
@@ -130,7 +158,10 @@ class BumbleRadio:
                 except Exception:
                     pass
         if self.device.keystore is not None:
-            await self.device.keystore.delete(address)
+            try:
+                await self.device.keystore.delete(address)
+            except KeyError:
+                pass  # not bonded with this controller (e.g. after swapping dongles)
         self.peer_names.pop(address, None)
 
     async def set_discoverable(self, on: bool) -> None:
@@ -149,7 +180,9 @@ class BumbleRadio:
         if (existing := self.existing_connection(address)) is not None:
             return existing
         try:
-            connection = await self.device.connect(address, transport=BT_BR_EDR_TRANSPORT)
+            connection = await self.device.connect(
+                address, transport=BT_BR_EDR_TRANSPORT
+            )
         except Exception:
             if (existing := self.existing_connection(address)) is not None:
                 return existing
@@ -203,6 +236,10 @@ async def _watch_usb(spec: str, transport: Any) -> None:
         now = _usb_identity(*ids)
         dead = terminated is not None and terminated.done()
         if now != start or dead:
-            log.error("USB radio lost (was %s, now %s, terminated=%s); exiting for a clean restart",
-                      start, now, dead)
+            log.error(
+                "USB radio lost (was %s, now %s, terminated=%s); exiting for a clean restart",
+                start,
+                now,
+                dead,
+            )
             os._exit(3)

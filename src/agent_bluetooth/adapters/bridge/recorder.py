@@ -34,8 +34,12 @@ class RecorderBridge:
         return {"room": None}
 
     async def attach_audio(self, call: Call, audio: AudioPipe) -> None:
+        if call.id in self._tasks:
+            return  # audio-up is announced again when the call goes active: one reader only
         digits = "".join(c for c in call.number if c.isdigit()) or "unknown"
-        path = self.dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{call.direction}-{digits}.wav"
+        path = (
+            self.dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{call.direction}-{digits}.wav"
+        )
         self._tasks[call.id] = asyncio.create_task(self._record(call, audio, path))
 
     async def close(self, call: Call) -> None:
@@ -60,4 +64,9 @@ class RecorderBridge:
             w.close()
             secs = frames / audio.sample_rate
             log.info("saved %s (%.1fs)", path, secs)
-            self.bus.publish(E.RECORDING_SAVED, call_id=call.id, file=str(path), seconds=round(secs, 1))
+            self.bus.publish(
+                E.RECORDING_SAVED,
+                call_id=call.id,
+                file=str(path),
+                seconds=round(secs, 1),
+            )

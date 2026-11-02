@@ -11,6 +11,8 @@ Adapters only talk to each other through the EventBus and AudioPipe.
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -45,17 +47,45 @@ class AudioPipe:
         self._max_bytes = sample_rate * PCM_BYTES_PER_SAMPLE * max_buffer_ms // 1000
         self._from_phone: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=50)
         self._to_phone = bytearray()
+        self.dropped = 0  # chunks from the phone dropped because the reader fell behind
+        self.pushed = 0  # bytes received from the phone
+        self.opened_at = time.monotonic()
+        self.bridge_buffer_ms = 0.0  # set by the bridge: audio queued on its side
 
     # phone side ------------------------------------------------------------
     def push_from_phone(self, pcm: bytes) -> None:
+        self.pushed += len(pcm)
         if self._from_phone.full():
             self._from_phone.get_nowait()  # drop oldest, stay real-time
+            self.dropped += 1
         self._from_phone.put_nowait(pcm)
 
     def pull_to_phone(self, nbytes: int) -> bytes:
         chunk = bytes(self._to_phone[:nbytes])
         del self._to_phone[:nbytes]
         return chunk + b"\x00" * (nbytes - len(chunk))
+
+    def live(self) -> dict[str, Any]:
+        """Numbers for the call screen's stats panel."""
+        got = self.pushed / PCM_BYTES_PER_SAMPLE / self.sample_rate
+        wall = time.monotonic() - self.opened_at
+        return {
+            "sample_rate": self.sample_rate,
+            "seconds": round(wall, 1),
+            "delivered_pct": round(100 * got / max(wall, 0.01), 1),
+            "dropped": self.dropped,
+            "to_phone_ms": round(
+                len(self._to_phone) / PCM_BYTES_PER_SAMPLE / self.sample_rate * 1000
+            ),
+            "bridge_buffer_ms": round(self.bridge_buffer_ms),
+            "box_load": round(os.getloadavg()[0], 2),
+        }
+
+    def stats(self) -> str:
+        """Audio actually delivered by the phone vs wall time since the link opened."""
+        got = self.pushed / PCM_BYTES_PER_SAMPLE / self.sample_rate
+        wall = time.monotonic() - self.opened_at
+        return f"phone delivered {got:.1f}s of audio in {wall:.1f}s ({100 * got / max(wall, 0.01):.0f}%), dropped {self.dropped} chunks"
 
     def close(self) -> None:
         self._from_phone.put_nowait(None)
@@ -64,6 +94,12 @@ class AudioPipe:
     async def read(self) -> bytes | None:
         """Next chunk heard on the phone line. None = pipe closed."""
         return await self._from_phone.get()
+
+    def read_nowait(self) -> bytes | None:
+        """Next buffered chunk without waiting; b"" if none, None if closed."""
+        if self._from_phone.empty():
+            return b""
+        return self._from_phone.get_nowait()
 
     def read_discard(self) -> None:
         """Drop buffered caller audio (used while playing a clip, to avoid echo)."""
@@ -88,6 +124,7 @@ class Phone(Component, Protocol):
     def status(self) -> dict[str, Any]: ...
     def audio(self) -> AudioPipe | None:
         """Pipe for the live call audio, or None when no audio link is up."""
+
     async def answer(self) -> None: ...
     async def hangup(self) -> None: ...
     async def dial(self, number: str) -> None: ...
@@ -115,6 +152,7 @@ class Bridge(AudioHandler, Protocol):
     async def open(self, call: Call) -> dict[str, Any]:
         """Create the room for a call (before it is answered). Returns room info.
         Must publish ROOM_JOINED / ROOM_LEFT with call_id and `others` count."""
+
     def join_info(self, room: str, identity: str) -> dict[str, Any]:
         """Credentials for a human/agent to join a room."""
 

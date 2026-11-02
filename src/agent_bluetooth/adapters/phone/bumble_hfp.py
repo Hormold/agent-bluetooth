@@ -33,6 +33,11 @@ class BumbleHfpPhone:
         self.bus = ctx.bus
         self.reconnect_every = float(cfg.get("reconnect_every", 25))
         self.reconcile_every = float(cfg.get("reconcile_every", 10))
+        # Lost a working link and couldn't get it back in this long? The clone
+        # controller is wedged (seen after a hangup + connection collision):
+        # restart the process, which resets the controller on open.
+        self.offline_restart = float(cfg.get("offline_restart", 90))
+        self._lost_at: float | None = None
         self._cind_failures = 0
         self.radio: BumbleRadio | None = None
         self.hf: hfp.HfProtocol | None = None
@@ -40,6 +45,8 @@ class BumbleHfpPhone:
         self.call: Call | None = None
         self.pipe: AudioPipe | None = None
         self.indicators: dict[str, int] = {}
+        self._link_info: dict[str, str] = {}
+        self._last_pushed = 0
         self._tasks: list[asyncio.Task] = []
         self.config = hfp.HfConfiguration(
             supported_hf_features=[
@@ -60,17 +67,35 @@ class BumbleHfpPhone:
         self._tasks.append(asyncio.create_task(self._bring_up()))
 
     async def _bring_up(self) -> None:
+        failures = 0
         while self.radio is None:
             try:
                 self.radio = await BumbleRadio.shared(self.ctx)
             except Exception as e:
+                failures += 1
+                if failures >= 3:
+                    # Leaked USB state can't be fixed in-process: exit so systemd
+                    # restarts us clean (ExecStartPre also recovers the dongle).
+                    log.error(
+                        "radio bring-up failed %d times (%s); exiting for a clean restart",
+                        failures,
+                        e,
+                    )
+                    import os
+
+                    os._exit(4)
                 log.warning("radio bring-up failed (%s); retrying in 10s", e)
                 await asyncio.sleep(10)
                 continue
             channel = self.radio.rfcomm.listen(self._on_dlc)
-            self.radio.add_sdp_record(lambda h, ch=channel: hfp.make_hf_sdp_records(h, ch, self.config))
+            self.radio.add_sdp_record(
+                lambda h, ch=channel: hfp.make_hf_sdp_records(h, ch, self.config)
+            )
             self._tasks.append(asyncio.create_task(self._reconnect_loop()))
-            log.info("hands-free ready on RFCOMM channel %s; pair your phone with it", channel)
+            log.info(
+                "hands-free ready on RFCOMM channel %s; pair your phone with it",
+                channel,
+            )
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -84,11 +109,18 @@ class BumbleHfpPhone:
     def status(self) -> dict[str, Any]:
         return {
             "adapter": "bumble-hfp",
+            "radio": self.radio is not None,
+            "name": self.radio.peer_names.get(str(self.connection.peer_address), "")
+            if self.radio and self.connection
+            else "",
             "connected": self.hf is not None,
             "peer": str(self.connection.peer_address) if self.connection else None,
             "call": self.call.to_dict() if self.call else None,
             "indicators": self.indicators,
             "audio": self.pipe is not None,
+            "audio_stats": {**self.pipe.live(), **self._link_info}
+            if self.pipe
+            else None,
         }
 
     def audio(self) -> AudioPipe | None:
@@ -118,7 +150,9 @@ class BumbleHfpPhone:
     async def hangup(self) -> None:
         ringing = self.call and self.call.state == "ringing"
         hf = self._hf()
-        await self._cmd("hangup", hf.reject_incoming_call() if ringing else hf.terminate_call())
+        await self._cmd(
+            "hangup", hf.reject_incoming_call() if ringing else hf.terminate_call()
+        )
 
     async def dial(self, number: str) -> None:
         # ATD only returns OK once the AG accepts the request; time-box it so a
@@ -130,7 +164,9 @@ class BumbleHfpPhone:
             await self._cmd("dtmf", self._hf().execute_command(f"AT+VTS={d}"))
 
     async def set_volume(self, level: int) -> None:
-        await self._cmd("volume", self._hf().execute_command(f"AT+VGS={max(0, min(15, level))}"))
+        await self._cmd(
+            "volume", self._hf().execute_command(f"AT+VGS={max(0, min(15, level))}")
+        )
 
     def _hf(self) -> hfp.HfProtocol:
         if self.hf is None:
@@ -150,23 +186,58 @@ class BumbleHfpPhone:
         reconnect. Paging too aggressively is what blocks 'Connect' on the phone.
         So: long idle windows (connectable), short infrequent outbound tries."""
         assert self.radio
+        hci_failures = 0
         while True:
-            # stay connectable so the phone can reconnect to us during the idle window
+            # Stay connectable so the phone can reconnect to us during the idle
+            # window. This is also our HCI health probe: if the controller stops
+            # answering commands, nothing in-process can fix it.
             try:
-                await self.radio.set_connectable(True)
-            except Exception:
-                pass
+                await asyncio.wait_for(
+                    self.radio.device.set_connectable(True), timeout=5
+                )
+                hci_failures = 0
+            except Exception as e:
+                hci_failures += 1
+                log.warning(
+                    "HCI not responding (%s), %d in a row",
+                    e or type(e).__name__,
+                    hci_failures,
+                )
+                if hci_failures >= 2:
+                    self._restart("controller stopped answering HCI commands")
             await asyncio.sleep(self.reconnect_every)
-            if self.hf is None:
-                for address in await self.radio.bonded_addresses():
-                    if self.hf is not None:
-                        break
-                    try:
-                        await self._try_reconnect(address)
-                    except TimeoutError:
-                        log.info("reconnect to %s timed out", address)
-                    except Exception as e:
-                        log.info("reconnect to %s failed: %s", address, e)
+            if self.hf is not None:
+                continue
+            if (
+                self._lost_at
+                and asyncio.get_running_loop().time() - self._lost_at
+                > self.offline_restart
+            ):
+                self._restart(
+                    f"phone link lost {self.offline_restart:.0f}s ago and not recovered"
+                )
+            try:
+                addresses = await asyncio.wait_for(
+                    self.radio.bonded_addresses(), timeout=5
+                )
+            except Exception:
+                continue
+            for address in addresses:
+                if self.hf is not None:
+                    break
+                try:
+                    await self._try_reconnect(address)
+                except TimeoutError:
+                    log.info("reconnect to %s timed out", address)
+                except Exception as e:
+                    log.info("reconnect to %s failed: %s", address, e)
+
+    @staticmethod
+    def _restart(reason: str) -> None:
+        import os
+
+        log.error("%s; exiting for a clean restart", reason)
+        os._exit(5)
 
     async def _try_reconnect(self, address: str) -> None:
         # Short timeout only for paging (keeps the radio free to accept the
@@ -192,9 +263,15 @@ class BumbleHfpPhone:
         conn.on("sco_connection", self._on_sco)
         conn.on(conn.EVENT_DISCONNECTION, self._on_disconnect)
         await self._disable_sniff(conn)
-        hf.on(hf.EVENT_AG_INDICATOR, lambda ind: asyncio.create_task(self._on_indicator(ind)))
+        hf.on(
+            hf.EVENT_AG_INDICATOR,
+            lambda ind: asyncio.create_task(self._on_indicator(ind)),
+        )
         hf.on(hf.EVENT_CLI_NOTIFICATION, self._on_clip)
-        hf.on(hf.EVENT_SPEAKER_VOLUME, lambda v: self.bus.publish(E.PHONE_STATUS, speaker_volume=v))
+        hf.on(
+            hf.EVENT_SPEAKER_VOLUME,
+            lambda v: self.bus.publish(E.PHONE_STATUS, speaker_volume=v),
+        )
 
         await asyncio.wait_for(hf.initiate_slc(), timeout=15)
         self.hf = hf
@@ -205,7 +282,12 @@ class BumbleHfpPhone:
         address, name = str(conn.peer_address), (conn.peer_name or "")
         if name:
             self.radio.peer_names[address] = name
-        self.bus.publish(E.PHONE_CONNECTED, address=address, name=self.radio.peer_names.get(address, name))
+        self._lost_at = None
+        self.bus.publish(
+            E.PHONE_CONNECTED,
+            address=address,
+            name=self.radio.peer_names.get(address, name),
+        )
         self._update_call_state()
 
     # pairing / device management ------------------------------------------
@@ -236,12 +318,28 @@ class BumbleHfpPhone:
                 self._cind_failures = 0
                 if self.call is not None and not self.call.number:
                     await self._fetch_number()
+            elif self._audio_flowing():
+                # Call audio is arriving, so the link is alive; AT replies are
+                # just slow under load. Recycling here would kill a good call.
+                self._cind_failures = 0
             else:
                 self._cind_failures += 1
                 if self._cind_failures >= 3 and self.hf is hf:
-                    log.warning("HFP link unresponsive (%d missed heartbeats); recycling", self._cind_failures)
+                    log.warning(
+                        "HFP link unresponsive (%d missed heartbeats); recycling",
+                        self._cind_failures,
+                    )
                     await self._recycle_link()
                     return
+
+    def _audio_flowing(self) -> bool:
+        """True if the phone delivered call audio since the last check."""
+        pipe = self.pipe
+        if pipe is None:
+            return False
+        flowing = pipe.pushed > self._last_pushed
+        self._last_pushed = pipe.pushed
+        return flowing
 
     async def _disable_sniff(self, conn: Connection) -> None:
         """Keep the ACL link in active mode. Cheap CSR clones often let the link
@@ -274,10 +372,14 @@ class BumbleHfpPhone:
             return False
         try:
             resp = await asyncio.wait_for(
-                self.hf.execute_command("AT+CIND?", response_type=hfp.AtResponseType.SINGLE), timeout=4
+                self.hf.execute_command(
+                    "AT+CIND?", response_type=hfp.AtResponseType.SINGLE
+                ),
+                timeout=4,
             )
         except Exception:
             return False
+
         def as_int(x: Any) -> int:
             if isinstance(x, (bytes, bytearray)):
                 x = x.decode()
@@ -293,6 +395,8 @@ class BumbleHfpPhone:
         return True
 
     def _on_disconnect(self, *_: Any) -> None:
+        if self.hf is not None and self._lost_at is None:
+            self._lost_at = asyncio.get_running_loop().time()
         self.hf = None
         self.connection = None
         self._audio_down()
@@ -328,7 +432,11 @@ class BumbleHfpPhone:
             asyncio.create_task(self._fetch_number())
         if state != self.call.state:
             self.call.state = state
-            event = {"ringing": E.CALL_RINGING, "dialing": E.CALL_DIALING, "active": E.CALL_ACTIVE}[state]
+            event = {
+                "ringing": E.CALL_RINGING,
+                "dialing": E.CALL_DIALING,
+                "active": E.CALL_ACTIVE,
+            }[state]
             self.bus.publish(event, call=self.call.to_dict())
             if self.pipe and state == "active":
                 self._announce_audio(True)
@@ -367,7 +475,9 @@ class BumbleHfpPhone:
             if link_type == hci.HCI_Connection_Complete_Event.LinkType.SCO
             else hfp.DefaultCodecParameters.ESCO_CVSD_S4
         ]
-        if conn.device.host.supports_command(hci.HCI_ENHANCED_ACCEPT_SYNCHRONOUS_CONNECTION_REQUEST_COMMAND):
+        if conn.device.host.supports_command(
+            hci.HCI_ENHANCED_ACCEPT_SYNCHRONOUS_CONNECTION_REQUEST_COMMAND
+        ):
             cmd = hci.HCI_Enhanced_Accept_Synchronous_Connection_Request_Command(
                 bd_addr=conn.peer_address, **params.asdict()
             )
@@ -377,10 +487,12 @@ class BumbleHfpPhone:
                 transmit_bandwidth=params.transmit_bandwidth,
                 receive_bandwidth=params.receive_bandwidth,
                 max_latency=params.max_latency,
-                voice_setting=int(hci.VoiceSetting(
-                    input_sample_size=hci.VoiceSetting.InputSampleSize.SIZE_16_BITS,
-                    input_data_format=hci.VoiceSetting.InputDataFormat.TWOS_COMPLEMENT,
-                )),
+                voice_setting=int(
+                    hci.VoiceSetting(
+                        input_sample_size=hci.VoiceSetting.InputSampleSize.SIZE_16_BITS,
+                        input_data_format=hci.VoiceSetting.InputDataFormat.TWOS_COMPLEMENT,
+                    )
+                ),
                 retransmission_effort=params.retransmission_effort,
                 packet_type=params.packet_type,
             )
@@ -391,14 +503,27 @@ class BumbleHfpPhone:
             log.warning("phone negotiated a transparent (mSBC) link; not supported yet")
             return
         pipe = self.pipe = AudioPipe(CVSD_RATE)
+        self._last_pushed = 0
+        self._link_info = {
+            "codec": "CVSD",
+            "link": "eSCO"
+            if link.link_type == hci.HCI_Connection_Complete_Event.LinkType.ESCO
+            else "SCO",
+        }
         host = link.device.host
 
         def on_packet(packet: hci.HCI_SynchronousDataPacket) -> None:
-            ok = packet.packet_status == hci.HCI_SynchronousDataPacket.Status.CORRECTLY_RECEIVED_DATA
+            ok = (
+                packet.packet_status
+                == hci.HCI_SynchronousDataPacket.Status.CORRECTLY_RECEIVED_DATA
+            )
             data = packet.data if ok else b"\x00" * len(packet.data)
             pipe.push_from_phone(data)
             # SCO is clocked by the phone: answer every packet with the same size.
-            host.send_sco_sdu(connection_handle=packet.connection_handle, sdu=pipe.pull_to_phone(len(data)))
+            host.send_sco_sdu(
+                connection_handle=packet.connection_handle,
+                sdu=pipe.pull_to_phone(len(data)),
+            )
 
         link.sink = on_packet
         link.on(link.EVENT_DISCONNECTION, lambda *_: self._audio_down())
@@ -413,4 +538,6 @@ class BumbleHfpPhone:
 
     def _announce_audio(self, up: bool) -> None:
         if self.call:
-            self.bus.publish(E.CALL_AUDIO, call=self.call.to_dict(), up=up, sample_rate=CVSD_RATE)
+            self.bus.publish(
+                E.CALL_AUDIO, call=self.call.to_dict(), up=up, sample_rate=CVSD_RATE
+            )

@@ -47,14 +47,25 @@ class HistoryEntry:
     at: str
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "number": self.number, "kind": self.kind, "at": self.at}
+        return {
+            "name": self.name,
+            "number": self.number,
+            "kind": self.kind,
+            "at": self.at,
+        }
+
+
+# PBAP vCard property mask (PBAP spec 5.1.4.1)
+_VERSION, _FN, _N, _TEL, _CALL_DATETIME = 1 << 0, 1 << 1, 1 << 2, 1 << 7, 1 << 28
+CONTACT_FIELDS = _VERSION | _FN | _N | _TEL
+HISTORY_FIELDS = CONTACT_FIELDS | _CALL_DATETIME
 
 
 class BumblePbap:
     def __init__(self, radio: BumbleRadio) -> None:
         self.radio = radio
 
-    async def _pull(self, address: str, obj: str, max_count: int) -> str:
+    async def _pull(self, address: str, obj: str, max_count: int, fields: int) -> str:
         conn = self._connection(address)
         if conn is None:
             raise RuntimeError("phone not connected")
@@ -68,9 +79,13 @@ class BumblePbap:
             params = app_params(
                 m=(T_MAX_LIST, 2, max_count),
                 fmt=(T_FORMAT, 1, 1),  # vCard 3.0
-                flt=(T_FILTER, 8, 0),  # 0 = all properties
+                # Only the fields we use. 0 means "everything", which includes
+                # contact PHOTOs and turns a phonebook pull into minutes.
+                flt=(T_FILTER, 8, fields),
             )
-            return (await obex.get(TYPE_PHONEBOOK, obj, params)).decode("utf-8", "replace")
+            return (await obex.get(TYPE_PHONEBOOK, obj, params)).decode(
+                "utf-8", "replace"
+            )
         finally:
             with_close = getattr(obex.dlc, "disconnect", None)
             if with_close:
@@ -86,13 +101,17 @@ class BumblePbap:
         return None
 
     async def contacts(self, address: str, limit: int = 1000) -> list[Contact]:
-        vcf = await self._pull(address, PB_CONTACTS, limit)
-        out = [c for c in (_parse_contact(v) for v in _split_vcards(vcf)) if c and c.numbers]
+        vcf = await self._pull(address, PB_CONTACTS, limit, CONTACT_FIELDS)
+        out = [
+            c
+            for c in (_parse_contact(v) for v in _split_vcards(vcf))
+            if c and c.numbers
+        ]
         log.info("PBAP: %d contacts", len(out))
         return out
 
     async def history(self, address: str, limit: int = 100) -> list[HistoryEntry]:
-        vcf = await self._pull(address, PB_HISTORY, limit)
+        vcf = await self._pull(address, PB_HISTORY, limit, HISTORY_FIELDS)
         out = [h for h in (_parse_history(v) for v in _split_vcards(vcf)) if h]
         log.info("PBAP: %d call-history entries", len(out))
         return out

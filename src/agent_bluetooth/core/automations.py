@@ -38,7 +38,11 @@ class AutomationEngine:
         self.actions = actions
         for rule in self.rules:
             if rule.get("do") not in actions:
-                log.warning("automation %r: unknown action %r", rule.get("name", "?"), rule.get("do"))
+                log.warning(
+                    "automation %r: unknown action %r",
+                    rule.get("name", "?"),
+                    rule.get("do"),
+                )
         if self.rules:
             ctx.bus.subscribe(self.on_event)
             log.info("loaded %d automations", len(self.rules))
@@ -57,11 +61,23 @@ class AutomationEngine:
             if action is None:
                 continue
             ctx_vars = {**fields, **extracted}
-            params = {k: _render(v, ctx_vars) for k, v in rule.items() if isinstance(v, str)}
-            log.info("automation %r fired on %s", rule.get("name", rule["do"]), event.type)
-            asyncio.create_task(self._run(rule.get("name", rule["do"]), action, params, ctx_vars))
+            params = {
+                k: _render(v, ctx_vars) for k, v in rule.items() if isinstance(v, str)
+            }
+            log.info(
+                "automation %r fired on %s", rule.get("name", rule["do"]), event.type
+            )
+            asyncio.create_task(
+                self._run(rule.get("name", rule["do"]), action, params, ctx_vars)
+            )
 
-    async def _run(self, name: str, action: Action, params: dict[str, Any], ctx_vars: dict[str, str]) -> None:
+    async def _run(
+        self,
+        name: str,
+        action: Action,
+        params: dict[str, Any],
+        ctx_vars: dict[str, str],
+    ) -> None:
         try:
             await action(params, ctx_vars)
         except Exception:

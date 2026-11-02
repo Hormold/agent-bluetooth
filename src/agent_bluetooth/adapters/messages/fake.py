@@ -21,5 +21,7 @@ class FakeMessages:
     async def send(self, to: str, text: str) -> None:
         self.bus.publish(E.SMS_SENT, to=to, text=text)
 
-    async def simulate(self, kind: str, sender: str = "+15551234567", text: str = "Hello!", **_: Any) -> None:
+    async def simulate(
+        self, kind: str, sender: str = "+15551234567", text: str = "Hello!", **_: Any
+    ) -> None:
         self.bus.publish(E.SMS_RECEIVED, sender=sender, text=text, id="fake")

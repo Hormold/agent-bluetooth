@@ -9,9 +9,25 @@ struct Indicators: Decodable {
 
 struct Phone: Decodable {
     var connected: Bool
+    var radio: Bool?
+    var name: String?
     var peer: String?
     var call: Call?
     var indicators: Indicators?
+    var audio_stats: LineStats?
+}
+
+/// Bluetooth side of a live call, from the box (phone.audio_stats).
+struct LineStats: Decodable {
+    var codec: String?
+    var link: String?
+    var sample_rate: Int
+    var seconds: Double
+    var delivered_pct: Double
+    var dropped: Int
+    var to_phone_ms: Int
+    var bridge_buffer_ms: Int
+    var box_load: Double?
 }
 
 struct Call: Decodable, Identifiable, Equatable {
@@ -75,14 +91,14 @@ struct RecentCall: Identifiable {
     var display: String { name.isEmpty ? number : name }
 }
 
-struct Contact: Decodable, Identifiable {
+struct Contact: Codable, Identifiable {
     var name: String
     var numbers: [String]
     var id: String { name + (numbers.first ?? "") }
     var primary: String { numbers.first ?? "" }
 }
 
-struct HistoryItem: Decodable, Identifiable {
+struct HistoryItem: Codable, Identifiable {
     var name: String
     var number: String
     var kind: String   // received | dialed | missed
@@ -107,4 +123,44 @@ struct AppSettings: Decodable {
     var play_file: String
     var answer: String
     var livekit: LiveKit
+}
+
+/// Server-side directory sync state (GET /api/directory).
+struct DirectoryInfo: Decodable {
+    var counts: [String: Int]
+    var synced_at: [String: Double]
+    var duration: [String: Double]
+    var syncing: String?
+    var last_error: String?
+    var phone: String?
+}
+
+/// Last directory the app saw, kept on disk so launch shows it instantly.
+struct DirectorySnapshot: Codable {
+    var contacts: [Contact]
+    var history: [HistoryItem]
+
+    private static var url: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AgentPhone", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("directory.json")
+    }
+
+    static func load() -> DirectorySnapshot? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(DirectorySnapshot.self, from: data)
+    }
+
+    func save() {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        try? data.write(to: Self.url, options: [.atomic, .completeFileProtection])
+    }
+}
+
+/// The box itself, from GET /api/debug (logs/events are for agents, not shown).
+struct BoxInfo: Decodable {
+    struct Config: Decodable { var transport: String?; var bridge: String?; var messages: String? }
+    var uptime_s: Int
+    var config: Config
 }

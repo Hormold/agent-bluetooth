@@ -18,6 +18,11 @@ scripts the phone the same way it scripts a browser:
     agent-bluetooth dtmf <digits>
     agent-bluetooth sms <to> <text...>     # send an SMS
     agent-bluetooth sim call|sms|...       # inject fake traffic (fake adapters)
+    agent-bluetooth contacts [query]       # phonebook (last sync, instant)
+    agent-bluetooth history                # recent calls from the phone
+    agent-bluetooth sync                   # re-pull contacts + history now
+    agent-bluetooth debug                  # everything: phone, radio, sync, calls, events, logs
+    agent-bluetooth logs [-n 100]          # daemon log tail (no SSH needed)
 
 Target a remote box with --host / --key (or AGENT_BLUETOOTH_HOST / _KEY).
 Agents: run `agent-bluetooth guide` for the full recipe.
@@ -48,7 +53,9 @@ def _req(args: argparse.Namespace, method: str, path: str, body: dict | None = N
     except urllib.error.HTTPError as e:
         sys.exit(f"error {e.code}: {e.read().decode().strip()}")
     except urllib.error.URLError as e:
-        sys.exit(f"cannot reach daemon at {args.host}: {e.reason}\nstart it with: agent-bluetooth serve")
+        sys.exit(
+            f"cannot reach daemon at {args.host}: {e.reason}\nstart it with: agent-bluetooth serve"
+        )
 
 
 def _out(obj) -> None:
@@ -57,7 +64,9 @@ def _out(obj) -> None:
 
 def _watch(args: argparse.Namespace) -> None:
     families = set(args.families)
-    url = f"{args.host.rstrip('/')}/api/events" + (f"?key={args.key}" if args.key else "")
+    url = f"{args.host.rstrip('/')}/api/events" + (
+        f"?key={args.key}" if args.key else ""
+    )
     req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
     if args.key:
         req.add_header("Authorization", f"Bearer {args.key}")
@@ -77,8 +86,15 @@ def _watch(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="agent-bluetooth", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--host", default=os.environ.get("AGENT_BLUETOOTH_HOST", "http://127.0.0.1:8080"))
+    p = argparse.ArgumentParser(
+        prog="agent-bluetooth",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--host",
+        default=os.environ.get("AGENT_BLUETOOTH_HOST", "http://127.0.0.1:8080"),
+    )
     p.add_argument("--key", default=os.environ.get("AGENT_BLUETOOTH_KEY", ""))
     p.add_argument("--timeout", type=float, default=15)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -101,13 +117,17 @@ def main() -> None:
     pl = sub.add_parser("play", help="answer and play a WAV into the line")
     pl.add_argument("file")
     pl.add_argument("--loop", action="store_true")
-    pl.add_argument("--keep", action="store_true", help="don't hang up when the clip ends")
+    pl.add_argument(
+        "--keep", action="store_true", help="don't hang up when the clip ends"
+    )
     pl.add_argument("--call-id", default=None)
 
     br = sub.add_parser("bridge", help="answer and move audio into a LiveKit room")
     br.add_argument("--call-id", default=None)
 
-    j = sub.add_parser("join", help="print LiveKit url+token to join the current call room")
+    j = sub.add_parser(
+        "join", help="print LiveKit url+token to join the current call room"
+    )
     j.add_argument("identity", nargs="?", default="cli")
 
     d = sub.add_parser("dtmf", help="send DTMF digits")
@@ -123,10 +143,21 @@ def main() -> None:
     si.add_argument("kind")
     si.add_argument("params", nargs="*", help="key=value pairs, e.g. number=+1555...")
 
+    co = sub.add_parser("contacts", help="phonebook from the last sync")
+    co.add_argument("query", nargs="?", default="", help="filter by name or number")
+    sub.add_parser("history", help="recent calls from the phone")
+    sub.add_parser("sync", help="re-pull contacts + history from the phone now")
+    sub.add_parser(
+        "debug", help="full diagnostic dump: phone, radio, sync, calls, events, logs"
+    )
+    lg = sub.add_parser("logs", help="daemon log tail")
+    lg.add_argument("-n", type=int, default=100)
+
     args = p.parse_args()
 
     if args.cmd == "serve":
         from .app import run_config
+
         run_config(args.config, args.verbose)
         return
     if args.cmd == "guide":
@@ -149,19 +180,53 @@ def main() -> None:
             body["call_id"] = args.call_id
         _out(_req(args, "POST", "/api/calls/play", body))
     elif args.cmd == "bridge":
-        _out(_req(args, "POST", "/api/calls/bridge", {"call_id": args.call_id} if args.call_id else {}))
+        _out(
+            _req(
+                args,
+                "POST",
+                "/api/calls/bridge",
+                {"call_id": args.call_id} if args.call_id else {},
+            )
+        )
     elif args.cmd == "join":
         status = _req(args, "GET", "/api/status")
         rooms = [c["room"] for c in status["calls"] if c.get("room")]
         if not rooms:
             sys.exit("no active call with a room; run `bridge` first")
-        _out(_req(args, "POST", "/api/token", {"room": rooms[0], "identity": args.identity}))
+        _out(
+            _req(
+                args,
+                "POST",
+                "/api/token",
+                {"room": rooms[0], "identity": args.identity},
+            )
+        )
     elif args.cmd == "dtmf":
         _out(_req(args, "POST", "/api/calls/dtmf", {"digits": args.digits}))
     elif args.cmd == "volume":
         _out(_req(args, "POST", "/api/volume", {"level": args.level}))
     elif args.cmd == "sms":
-        _out(_req(args, "POST", "/api/sms", {"to": args.to, "text": " ".join(args.text)}))
+        _out(
+            _req(args, "POST", "/api/sms", {"to": args.to, "text": " ".join(args.text)})
+        )
+    elif args.cmd == "contacts":
+        q = args.query.lower()
+        items = _req(args, "GET", "/api/contacts")
+        _out(
+            [
+                c
+                for c in items
+                if q in c["name"].lower() or any(q in n for n in c["numbers"])
+            ]
+        )
+    elif args.cmd == "history":
+        _out(_req(args, "GET", "/api/calls/history"))
+    elif args.cmd == "sync":
+        _out(_req(args, "POST", "/api/directory/sync", {}))
+    elif args.cmd == "debug":
+        _out(_req(args, "GET", "/api/debug"))
+    elif args.cmd == "logs":
+        print("\n".join(_req(args, "GET", "/api/debug")["logs"][-args.n :]))
     elif args.cmd == "sim":
         params = dict(kv.split("=", 1) for kv in args.params)
         _out(_req(args, "POST", f"/api/simulate/{args.kind}", params))

@@ -32,7 +32,11 @@ class TelegramSink:
             case E.SMS_RECEIVED:
                 return f"💬 <b>SMS from {_who(d)}</b>\n{escape(d.get('text', ''))}"
             case E.ROOM_OPENED if d.get("direction") == "in":
-                link = f'\n<a href="{self.web_url}/?room={d["room"]}">Join the call</a>' if self.web_url else ""
+                link = (
+                    f'\n<a href="{self.web_url}/?room={d["room"]}">Join the call</a>'
+                    if self.web_url
+                    else ""
+                )
                 return f"📞 <b>Incoming call</b> from {_who(d)}\nRoom: <code>{escape(d['room'])}</code>{link}"
             case E.CALL_ENDED:
                 return f"☎️ Call with {_who(call)} ended"
@@ -47,7 +51,12 @@ class TelegramSink:
         if text is None:
             return
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
         async with aiohttp.ClientSession() as http:
             async with http.post(url, json=payload) as r:
                 if r.status >= 400:

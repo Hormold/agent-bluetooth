@@ -57,13 +57,22 @@ class BumbleMapMessages:
     async def send(self, to: str, text: str) -> None:
         if self.obex is None:
             raise RuntimeError("MAP not connected")
-        await self.obex.put("x-bt/message", "outbox", _bmessage(to, text), app_params(c=(T_CHARSET, 1, 1)))
+        await self.obex.put(
+            "x-bt/message",
+            "outbox",
+            _bmessage(to, text),
+            app_params(c=(T_CHARSET, 1, 1)),
+        )
         self.bus.publish(E.SMS_SENT, to=to, text=text)
 
     # internals -------------------------------------------------------------
     async def _run(self, address: str) -> None:
         try:
-            conn = next(c for c in self.radio.device.connections.values() if str(c.peer_address) == address)
+            conn = next(
+                c
+                for c in self.radio.device.connections.values()
+                if str(c.peer_address) == address
+            )
             channel = await rfcomm.find_rfcomm_channel_with_uuid(conn, MAS_UUID)
             if channel is None:
                 log.warning("phone has no MAP service; SMS disabled")
@@ -112,7 +121,11 @@ class BumbleMapMessages:
 
     async def _fetch(self, handle: str) -> str:
         assert self.obex
-        raw = await self.obex.get("x-bt/message", handle, app_params(a=(T_ATTACHMENT, 1, 0), c=(T_CHARSET, 1, 1)))
+        raw = await self.obex.get(
+            "x-bt/message",
+            handle,
+            app_params(a=(T_ATTACHMENT, 1, 0), c=(T_CHARSET, 1, 1)),
+        )
         text = raw.decode("utf-8", "replace")
         start, end = text.find("BEGIN:MSG"), text.rfind("END:MSG")
         return text[start + len("BEGIN:MSG") : end].strip() if start >= 0 < end else ""

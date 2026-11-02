@@ -55,7 +55,11 @@ class CallRouter:
     # event loop ------------------------------------------------------------
     async def on_event(self, event: Event) -> None:
         d = event.data
-        call = self._call(d["call"]) if "call" in d else self.calls.get(d.get("call_id", ""))
+        call = (
+            self._call(d["call"])
+            if "call" in d
+            else self.calls.get(d.get("call_id", ""))
+        )
         if call is None:
             return
         match event.type:
@@ -73,7 +77,9 @@ class CallRouter:
             case E.PLAYBACK_DONE:
                 log.info("clip done on %s, hanging up", call.id)
                 await self.phone.hangup()
-            case E.ROOM_JOINED if call.state == "ringing" and self.answer_mode == "on_join":
+            case E.ROOM_JOINED if (
+                call.state == "ringing" and self.answer_mode == "on_join"
+            ):
                 await self.phone.answer()
             case E.ROOM_LEFT if self.hangup_on_empty and d.get("others", 0) == 0:
                 if call.state in ("active", "dialing"):
@@ -85,7 +91,13 @@ class CallRouter:
         if call.id in self.handlers:
             return
         mode = self._mode_for(call)
-        log.info("call %s (%s) from %s -> mode=%s", call.id, call.direction, call.number or "?", mode)
+        log.info(
+            "call %s (%s) from %s -> mode=%s",
+            call.id,
+            call.direction,
+            call.number or "?",
+            mode,
+        )
         if mode == "reject" and call.direction == "in":
             await self.phone.hangup()
             return
@@ -120,8 +132,12 @@ class CallRouter:
         await self._answer_or_attach(call, self.room_bridge, answer_on_join=True)
         return info
 
-    async def play_file(self, call: Call, path: str, loop: bool = False, hangup_after: bool = True) -> None:
-        handler = self.handlers[call.id] = FilePlayer(self.bus, path, loop, hangup_after)
+    async def play_file(
+        self, call: Call, path: str, loop: bool = False, hangup_after: bool = True
+    ) -> None:
+        handler = self.handlers[call.id] = FilePlayer(
+            self.bus, path, loop, hangup_after
+        )
         await self._answer_or_attach(call, handler)
 
     async def record(self, call: Call) -> None:
@@ -130,7 +146,9 @@ class CallRouter:
         self.handlers[call.id] = self._recorder
         await self._answer_or_attach(call, self._recorder)
 
-    async def _answer_or_attach(self, call: Call, handler: AudioHandler, answer_on_join: bool = False) -> None:
+    async def _answer_or_attach(
+        self, call: Call, handler: AudioHandler, answer_on_join: bool = False
+    ) -> None:
         if call.state == "ringing":
             # room modes with on_join wait for a joiner; everything else answers now
             if not (answer_on_join and self.answer_mode == "on_join"):
@@ -154,8 +172,12 @@ class CallRouter:
         self.rooms[call.id] = {}
         info = self.rooms[call.id] = await self.room_bridge.open(call)
         self.bus.publish(
-            E.ROOM_OPENED, call_id=call.id, number=call.number, name=call.name,
-            direction=call.direction, **info,
+            E.ROOM_OPENED,
+            call_id=call.id,
+            number=call.number,
+            name=call.name,
+            direction=call.direction,
+            **info,
         )
         return info
 
