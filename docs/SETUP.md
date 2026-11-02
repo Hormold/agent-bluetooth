@@ -32,9 +32,33 @@ Set it once in `[routing]` (or live over `/api/settings`, or in the app):
 | `record` | record the call to a WAV |
 | `reject` | (incoming) hang up |
 
+## Running on a Mac (no Linux box)
+
+The dongle is driven straight over USB, so macOS works the same as Linux:
+
+```bash
+brew install libusb livekit
+mkdir -p ~/.agent-bluetooth/rtl_bt   # Realtek firmware (TP-Link UB400 = RTL8761BU)
+curl -fsSLo ~/.agent-bluetooth/rtl_bt/rtl8761bu_fw.bin \
+  https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtl_bt/rtl8761bu_fw.bin
+curl -fsSLo ~/.agent-bluetooth/rtl_bt/rtl8761bu_config.bin \
+  https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtl_bt/rtl8761bu_config.bin
+
+livekit-server --dev --bind 127.0.0.1 --node-ip 127.0.0.1      # terminal 1
+BUMBLE_RTK_FIRMWARE_DIR=~/.agent-bluetooth/rtl_bt \
+  uv run agent-bluetooth serve config.toml                       # terminal 2
+```
+
+In `config.toml`: `transport = "usb:2357:0604+sco=2"`, LiveKit `url` and
+`client_url` = `ws://127.0.0.1:7880`. macOS leaves third-party dongles alone, so
+nothing needs to be disabled. Moving a dongle between machines keeps its
+Bluetooth address: copy `~/.agent-bluetooth/keys.json` along and the phone
+reconnects without pairing again.
+
 ## Platform notes
 
 - **Android**: SMS send/receive (MAP), contacts + call history (PBAP) all work.
 - **iPhone**: Apple blocks SMS over Bluetooth; use notifications instead (ANCS —
   on the roadmap). Calls, contacts, call history work.
-- **Onboard Pi Bluetooth** can't carry call audio — use the USB dongle.
+- **Any phone with Bluetooth headset support** works for calls (hands-free profile).
+- **Built-in Bluetooth** (Mac or Pi) can't be used — plug in the USB dongle.

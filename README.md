@@ -4,8 +4,9 @@
 
 **Turn any phone into an API — calls and SMS — over plain Bluetooth.**
 
-Pair a cheap always-on box (Raspberry Pi, Orange Pi, any Linux machine with a
-Bluetooth dongle) to your phone as if it were a car kit. Your real number, with
+Plug a $15 USB Bluetooth dongle into your Mac or a cheap always-on box
+(Raspberry Pi, Orange Pi, any Linux machine) and pair any phone that can use a
+Bluetooth headset, as if it were a car kit. Your real number, with
 no Twilio, no SIP, no second line, becomes programmable: incoming calls open a
 LiveKit room you (or an AI agent) can join and talk, SMS and 2FA codes forward
 anywhere, and everything is scriptable from one CLI.
@@ -65,10 +66,13 @@ transport + LiveKit creds, pair the phone with **"Agent Bluetooth"**. See
   `rtl8761bu_fw.bin` / `rtl8761bu_config.bin` firmware in `/lib/firmware/rtl_bt/`
   (from linux-firmware; Bumble uploads it on every start). Avoid no-name "CSR8510"
   clones (`33fa:0001`): they wedge on call audio.
-- **Box:** any Linux SBC with 4 cores (Raspberry Pi 4/5, Orange Pi 3 LTS tested), on
-  Ethernet or 5 GHz Wi-Fi. Use the dongle, not the onboard Bluetooth: onboard
-  chips route call audio over PCM, so it never reaches the software.
-- **Phone:** any Android or iPhone; it pairs as a car kit.
+- **Host:** your **Mac** works directly (no Linux box needed), or any Linux SBC with
+  4 cores for an always-on setup (Raspberry Pi 4/5, Orange Pi 3 LTS tested) on
+  Ethernet or 5 GHz Wi-Fi. Always use the USB dongle, not built-in Bluetooth:
+  the software drives the dongle directly, and built-in chips (Mac or Pi) don't
+  hand call audio to it.
+- **Phone:** any phone that can connect to a Bluetooth headset or car kit
+  (hands-free profile). Android, iPhone, even a basic feature phone.
 
 Setup details: [docs/SETUP.md](docs/SETUP.md) · systemd + auto-recovery:
 [docs/systemd.md](docs/systemd.md) · problems: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
