@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+<title id="title">Agent Phone: Signal receiver</title>
+<desc id="desc">macOS icon concept 1. Geometric mark within a continuous-curvature rounded square. Transparent outer margin.</desc>
+<path d="M 306,100 H 718 C 861,100 924,163 924,306 V 718 C 924,861 861,924 718,924 H 306 C 163,924 100,861 100,718 V 306 C 100,163 163,100 306,100 Z" fill="#111214"/>
+
+  <g transform="translate(-32 0)">
+  <!-- A squared receiver cradle; the open side faces two concentric radio arcs. -->
+  <path d="M 448,286 H 388 C 332,286 300,318 300,374 V 650 C 300,706 332,738 388,738 H 448 V 622 H 404 V 402 H 448 Z" fill="#F5F5F2"/>
+  <path d="M 548,390 C 616,414 650,456 650,512 C 650,568 616,610 548,634" fill="none" stroke="#F5F5F2" stroke-width="56" stroke-linecap="round"/>
+  <path d="M 654,294 C 758,342 808,414 808,512 C 808,610 758,682 654,730" fill="none" stroke="#F5F5F2" stroke-width="56" stroke-linecap="round"/>
+</g>
+</svg>
