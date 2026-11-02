@@ -236,8 +236,17 @@ def main() -> None:
         help="incoming/outgoing=app|agent|play|record|ignore; incoming=reject; agent_name, play_file, answer=auto|on_join|manual",
     )
 
-    c = sub.add_parser("call", help="place an outgoing call")
+    c = sub.add_parser(
+        "call",
+        help="place an outgoing call",
+        epilog='call +15551234567 --agent phone-agent --task "Book a table for 2 at 7pm"',
+    )
     c.add_argument("number")
+    c.add_argument(
+        "--agent", default="", help="LiveKit agent to dispatch for this call"
+    )
+    c.add_argument("--task", default="", help="what the agent should get done")
+    c.add_argument("--room", default="", help="join the phone into this existing room")
     sub.add_parser("answer", help="answer the ringing call")
     sub.add_parser("hangup", help="hang up / reject the current call")
 
@@ -403,7 +412,15 @@ def main() -> None:
         else:
             _out(_req(args, "GET", "/api/settings"))
     elif args.cmd == "call":
-        _out(_req(args, "POST", "/api/calls", {"number": args.number}))
+        body = {"number": args.number}
+        for key, value in (
+            ("agent_name", args.agent),
+            ("task", args.task),
+            ("room", args.room),
+        ):
+            if value:
+                body[key] = value
+        _out(_req(args, "POST", "/api/calls", body))
     elif args.cmd == "answer":
         _out(_req(args, "POST", "/api/calls/answer", {}))
     elif args.cmd == "hangup":

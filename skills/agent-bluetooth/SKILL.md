@@ -40,6 +40,20 @@ starts, start the waiter in another terminal first. Use `status` to check a call
 already active. Match keys refer to event data; nested keys use dots. Repeat
 `--match` to require several fields. `watch call sms` streams JSON lines.
 
+## Have a voice agent make the call
+
+When the user wants something done on a call (book, ask, confirm, cancel) and
+a LiveKit agent is running (the example registers `phone-agent`):
+
+```bash
+agent-bluetooth call +15551234567 --agent phone-agent --task "Book a table for 2 at 7pm under Nikita"
+agent-bluetooth wait call.ended --timeout 900
+```
+
+Write the task as you would brief a person: who it's for, what to get, what
+to accept. The agent's transcript is saved where it runs
+(`examples/livekit-agent/calls/<room>.json`); read it and report the outcome.
+
 ## Find contacts and recent calls
 
 ```bash

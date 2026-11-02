@@ -1,8 +1,8 @@
 [project]
-name = "livekit-phone-receptionist"
+name = "agent-bluetooth-phone-agent"
 version = "0.1.0"
-description = "LiveKit phone receptionist dispatched into agent-bluetooth call rooms"
-requires-python = ">=3.10"
+description = "LiveKit voice agent that answers and places calls on your phone through agent-bluetooth"
+requires-python = ">=3.11"
 dependencies = [
     "livekit-agents[openai]>=1.8",
     "python-dotenv>=1.0",

@@ -111,7 +111,9 @@ class LiveKitBridge:
 
     async def open(self, call: Call) -> dict[str, Any]:
         digits = re.sub(r"\D", "", call.number)[-10:] or "unknown"
-        name = f"{self.room_prefix}{time.strftime('%Y%m%d-%H%M%S')}-{digits}"
+        name = (
+            call.room or f"{self.room_prefix}{time.strftime('%Y%m%d-%H%M%S')}-{digits}"
+        )
         room = rtc.Room()
         s = self.sessions[call.id] = _Session(call=call, room=room, name=name)
         self._wire_events(s)

@@ -25,17 +25,38 @@ await ctx.room.local_participant.publish_dtmf(code=1, digit="1")
 Keys pressed by the other party can't be detected: Bluetooth hands-free
 carries audio only.
 
+## Have your agent place a call
+
+Same flow as LiveKit's [outbound calls](https://docs.livekit.io/telephony/making-calls/outbound-calls/),
+with the daemon in place of a SIP trunk. Dispatch the agent; it asks the
+daemon to dial into its room:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/calls -H 'content-type: application/json' \
+  -d '{"number": "+14155550142", "room": "<the agent's room>"}'
+```
+
+The phone joins as `phone` with `sip.callStatus = dialing` and flips to
+`active` when someone picks up. Start the agent session then.
+
+Or let the daemon open the room and dispatch the agent, with the task in the
+dispatch metadata (`number`, `direction: "out"`, `task`):
+
+```bash
+agent-bluetooth call +14155550142 --agent phone-agent --task "Confirm my 3pm appointment"
+```
+
 ## Send calls to your agent
 
 ```bash
-uv run agent-bluetooth settings set incoming=agent agent_name=phone-receptionist
+agent-bluetooth settings set incoming=agent agent_name=phone-agent
 ```
 
 Each call opens a room and dispatches the agent registered under that name;
 the call (number, direction) is in the dispatch metadata. When the room
 empties, the call is hung up.
 
-A complete receptionist agent: [examples/livekit-agent](../examples/livekit-agent).
+A complete agent for both directions: [examples/livekit-agent](../examples/livekit-agent).
 
 ## Joining a call yourself
 

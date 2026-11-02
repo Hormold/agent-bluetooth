@@ -1,22 +1,32 @@
 <img src="docs/assets/banner.png" alt="Agent Bluetooth" width="100%">
 
-**Your phone, as an API for agents.** A $15 USB Bluetooth dongle pairs with your
-phone like a headset. Calls, texts and contacts become a CLI, an HTTP API and
-LiveKit rooms. No Twilio, no SIP trunk, no new number: your real one.
+**Teach your agent to make phone calls for you.** Plug a $15 Bluetooth dongle
+into your computer, pair a phone, and a [LiveKit](https://livekit.io) voice
+agent can call anyone from your real number: book a table, sit through a phone
+menu, chase a refund. No Twilio, no SIP trunk, no new number.
+
+```bash
+agent-bluetooth call +14155550142 --agent phone-agent \
+  --task "Book a table for two tonight at 7, under Nikita"
+```
+
+The phone dials, the agent waits for someone to pick up, handles the
+conversation, hangs up, and saves the transcript.
 
 <p>
   <img src="docs/assets/terminal.png" alt="Claude texting through agent-bluetooth" width="62%">
   <img src="docs/assets/app.png" alt="Agent Phone for macOS" width="34%">
 </p>
 
-- **Calls.** Dial and answer from code. Each call is a LiveKit room where the
-  phone shows up as a SIP participant with native DTMF, so LiveKit telephony
-  agents work unchanged.
+- **Calls, both ways.** Your agent places calls and answers them. Each call
+  is a LiveKit room with your phone in it as a SIP participant (DTMF
+  included), so anything built for LiveKit telephony works unchanged.
 - **Texts** (Android): send, list, wait for a reply.
 - **Contacts and call history**, synced from the phone.
+- **A CLI and HTTP API** that print JSON, plus a **Claude Code skill**, so a
+  coding agent can text and call too.
 - **Agent Phone**, a small macOS softphone
-  ([download](https://github.com/Hormold/agent-bluetooth/releases/latest/download/Agent-Phone-0.1.0.zip)).
-  **A Claude Code skill**, so your agent can text and call.
+  ([download](https://github.com/Hormold/agent-bluetooth/releases/latest)).
 
 ## You need
 
@@ -54,18 +64,41 @@ Every command prints JSON. For Claude Code, copy the skill:
 `cp -r skills/agent-bluetooth ~/.claude/skills/`. Then just ask it to text or
 call someone. Full recipe: `agent-bluetooth guide`.
 
-## A voice agent on your calls
+## Your agent makes the call
 
-[examples/livekit-agent](examples/livekit-agent) is a small receptionist on
-LiveKit Agents (greets the caller, can press keys, hangs up):
+[examples/livekit-agent](examples/livekit-agent) is a complete voice agent on
+[LiveKit Agents](https://docs.livekit.io/agents/): about 200 lines, one file,
+both directions.
 
 ```bash
-cd examples/livekit-agent && uv sync
-uv run python -m livekit.agents start agent.py --dev
-agent-bluetooth settings set incoming=agent agent_name=phone-receptionist
+cd examples/livekit-agent && cp .env.example .env    # add OPENAI_API_KEY
+uv sync && uv run python agent.py                    # registers "phone-agent"
+
+agent-bluetooth call +14155550142 --agent phone-agent --task "Ask if they're open Sunday"
 ```
 
-How the phone appears in the room: [docs/LIVEKIT.md](docs/LIVEKIT.md).
+Or start it the LiveKit way, exactly like LiveKit's
+[outbound calls guide](https://docs.livekit.io/telephony/making-calls/outbound-calls/),
+just without a SIP trunk:
+
+```bash
+lk dispatch create --new-room --agent-name phone-agent \
+  --metadata '{"phone_number": "+14155550142", "task": "Ask if they are open Sunday"}'
+```
+
+To have it answer your calls as well:
+`agent-bluetooth settings set incoming=agent agent_name=phone-agent`.
+How the phone shows up in the room: [docs/LIVEKIT.md](docs/LIVEKIT.md).
+
+### Why LiveKit
+
+[LiveKit](https://github.com/livekit/livekit) is the open-source realtime
+stack this is built on: rooms, WebRTC, and
+[Agents](https://github.com/livekit/agents), the framework for voice agents
+with any STT, LLM and TTS (or a realtime model). `livekit-server --dev` runs it
+on your laptop; [LiveKit Cloud](https://cloud.livekit.io) hosts it when your
+agent needs to be reachable from anywhere. agent-bluetooth only adds the
+missing piece: a real phone line in the room.
 
 ## Mac app
 
@@ -90,6 +123,15 @@ button: installs and starts the local service and LiveKit through Homebrew and
 uv, or connects LiveKit Cloud if you want hosted voice agents. Then it's a
 phone: recents, contacts, keypad, incoming call alerts, and a choice of what
 happens when someone calls.
+
+## Ideas
+
+- **A phone in a drawer.** Keep an old phone on the dongle at home. Forward
+  your number to it (or give it out as your public number) and the agent
+  answers, screens spam, and texts you what matters.
+- **Calls on your real phone, through your agent.** A small app that rings
+  your own phone with the call your agent picked up, so it can hand a caller
+  over to you. Next example.
 
 ## Docs
 

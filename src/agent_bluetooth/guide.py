@@ -27,6 +27,9 @@ unless fetch_full is enabled; phone permissions/platform may limit SMS support.
 Call, wait for the other side to answer, press a key, hang up:
   agent-bluetooth call +15551234567
   agent-bluetooth wait call.active --timeout 60 --match call.number=+15551234567
+
+Let a LiveKit voice agent handle the call (dispatched with the task):
+  agent-bluetooth call +15551234567 --agent phone-agent --task "Ask if they're open Sunday"
   agent-bluetooth dtmf '1#'
   agent-bluetooth hangup
 wait consumes LIVE SSE events only. Start it before the triggering action if

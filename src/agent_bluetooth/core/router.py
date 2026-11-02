@@ -64,6 +64,7 @@ class CallRouter:
         self.handlers: dict[str, AudioHandler] = {}
         self.rooms: dict[str, dict[str, Any]] = {}
         self._recorder: RecorderBridge | None = None
+        self._dial: dict[str, Any] | None = None  # what the next outgoing call is for
         self.bus.subscribe(self.on_event)
 
     # event loop ------------------------------------------------------------
@@ -125,6 +126,9 @@ class CallRouter:
         if call.direction == "in" and not call.number and self._rules_need_caller():
             await self._wait_for_number(call)
         self._identify(call)
+        if call.direction == "out" and (dial := self._take_dial()):
+            await self._place(call, dial)
+            return
         rule = self._rule_for(call)
         mode = (
             rule.get("mode", rule.get("action", "app"))
@@ -163,6 +167,41 @@ class CallRouter:
                 self.bus, stall_dir, self.stall_minutes
             )
             await self._answer_or_attach(call, handler)
+
+    # outgoing calls placed by an agent -------------------------------------
+    async def dial(
+        self, number: str, room: str = "", agent_name: str = "", task: str = ""
+    ) -> None:
+        """Place a call and send it to a room. `room`: join the phone into an
+        existing room (an agent that dials, like CreateSIPParticipant).
+        `agent_name`: open a new room and dispatch that agent, with `task` in
+        its metadata."""
+        self._dial = {
+            "number": number,
+            "room": room,
+            "agent_name": agent_name,
+            "task": task,
+            "at": asyncio.get_running_loop().time(),
+        }
+        await self.phone.dial(number)
+
+    def _take_dial(self) -> dict[str, Any] | None:
+        dial, self._dial = self._dial, None
+        if dial and asyncio.get_running_loop().time() - dial["at"] < 30:
+            return dial
+        return None
+
+    async def _place(self, call: Call, dial: dict[str, Any]) -> None:
+        call.number = call.number or dial["number"]
+        call.room, call.task = dial["room"], dial["task"]
+        agent_name = dial["agent_name"]
+        log.info(
+            "call %s to %s -> %s",
+            call.id,
+            call.number,
+            f"room {call.room}" if call.room else f"agent {agent_name or '(none)'}",
+        )
+        await self.route_to_room(call, agent=bool(agent_name), agent_name=agent_name)
 
     def _rule_for(self, call: Call) -> dict[str, Any] | None:
         """First matching rule. Conditions (all optional): direction in|out|any,
@@ -247,6 +286,8 @@ class CallRouter:
             call = self.calls[data["id"]] = Call(**data)
         else:
             for k, v in data.items():
+                if k in _ROUTER_KNOWS and not v:
+                    continue  # the phone doesn't know it; keep what we found
                 setattr(call, k, v)
         return call
 
@@ -275,6 +316,10 @@ class CallRouter:
             await handler.close(call)
         if self.rooms.pop(call.id, None) is not None:
             self.bus.publish(E.ROOM_CLOSED, call_id=call.id)
+
+
+# Filled in by the router (contacts, agent dials); phone events send them empty.
+_ROUTER_KNOWS = ("number", "name", "contact", "room", "task")
 
 
 def _number_matches(number: str, pattern: str) -> bool:

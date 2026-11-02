@@ -52,7 +52,7 @@ the `rtl8761bu_*` firmware files from linux-firmware) on macOS and an Orange Pi.
 ```bash
 agent-bluetooth settings                     # what happens now, in plain words
 agent-bluetooth settings set incoming=app    # ring in the app (default)
-agent-bluetooth settings set incoming=agent agent_name=phone-receptionist
+agent-bluetooth settings set incoming=agent agent_name=phone-agent
 agent-bluetooth settings set incoming=play play_file=/abs/path/greeting.wav
 ```
 
@@ -60,7 +60,7 @@ Route by who calls (first match wins; unmatched calls use the mode above):
 
 ```bash
 agent-bluetooth rules add when_contact=false mode=play play_file=/abs/path/greeting.wav
-agent-bluetooth rules add when_contact=true mode=agent agent_name=phone-receptionist
+agent-bluetooth rules add when_contact=true mode=agent agent_name=phone-agent
 agent-bluetooth rules add when_number='+1800*' mode=reject
 agent-bluetooth rules list          # or: rules remove 0 | rules clear
 ```

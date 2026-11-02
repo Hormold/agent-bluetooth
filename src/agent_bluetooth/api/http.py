@@ -126,7 +126,14 @@ class HttpApi:
         body = await request.json()
         if not self.app.phone.status().get("connected"):
             raise web.HTTPServiceUnavailable(text="phone not connected")
-        asyncio.create_task(self.app.phone.dial(body["number"]))
+        asyncio.create_task(
+            self.app.router.dial(
+                body["number"],
+                room=body.get("room", ""),
+                agent_name=body.get("agent_name", ""),
+                task=body.get("task", ""),
+            )
+        )
         return web.json_response({"ok": True})
 
     async def play(self, request: web.Request) -> web.Response:

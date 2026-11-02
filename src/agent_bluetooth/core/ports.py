@@ -29,6 +29,8 @@ class Call:
     name: str = ""
     state: str = "ringing"  # ringing | dialing | active | ended
     contact: bool = False  # number is in the phone's contacts (name filled from there)
+    room: str = ""  # LiveKit room to join instead of a new one (agent-placed calls)
+    task: str = ""  # what an agent placing this call should get done
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     def to_dict(self) -> dict[str, Any]:
@@ -173,7 +175,8 @@ class AudioHandler(Protocol):
 @runtime_checkable
 class Bridge(AudioHandler, Protocol):
     async def open(self, call: Call) -> dict[str, Any]:
-        """Create the room for a call (before it is answered). Returns room info.
+        """Create the room for a call (before it is answered), or join call.room
+        when set. Returns room info.
         Must publish ROOM_JOINED / ROOM_LEFT with call_id and `others` count."""
 
     def join_info(self, room: str, identity: str) -> dict[str, Any]:
