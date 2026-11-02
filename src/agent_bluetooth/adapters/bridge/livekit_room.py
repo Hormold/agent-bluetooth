@@ -38,6 +38,10 @@ class _Session:
     pipe: AudioPipe | None = None
     tasks: list[asyncio.Task] = field(default_factory=list)
     connected: asyncio.Event = field(default_factory=asyncio.Event)
+    # audio-up is announced on dialing AND again when the call goes active; the
+    # two attach calls must not interleave or we publish two phone tracks.
+    attach_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    publication_sid: str | None = None
 
 
 class LiveKitBridge:
@@ -115,8 +119,12 @@ class LiveKitBridge:
                     break
             if s is None:
                 return
+        async with s.attach_lock:
+            await self._attach_locked(s, audio)
+
+    async def _attach_locked(self, s: _Session, audio: AudioPipe) -> None:
         if s.pipe is audio:
-            return
+            return  # already feeding this exact audio link
         try:  # the room must be fully connected before touching local_participant
             await asyncio.wait_for(s.connected.wait(), timeout=10)
         except TimeoutError:
@@ -127,9 +135,10 @@ class LiveKitBridge:
         rate = audio.sample_rate
         source = rtc.AudioSource(LK_RATE, 1)
         track = rtc.LocalAudioTrack.create_audio_track("phone-line", source)
-        await s.room.local_participant.publish_track(
+        pub = await s.room.local_participant.publish_track(
             track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
         )
+        s.publication_sid = pub.sid
         s.mixer = rtc.AudioMixer(rate, 1, blocksize=rate // 50)
         for sid, t in s.tracks.items():
             self._add_stream(s, sid, t)
@@ -211,6 +220,12 @@ class LiveKitBridge:
             s.mixer = None
         s.streams.clear()
         s.pipe = None
+        if s.publication_sid:  # a new audio link gets a fresh track, never a second one
+            try:
+                await s.room.local_participant.unpublish_track(s.publication_sid)
+            except Exception:
+                log.debug("unpublish failed", exc_info=True)
+            s.publication_sid = None
 
     @staticmethod
     async def _uplink(pipe: AudioPipe, source: rtc.AudioSource) -> None:
