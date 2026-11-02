@@ -7,7 +7,6 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             StatusBar(showSettings: $showSettings)
-            Divider().opacity(0.5)
             ZStack {
                 if let call = center.call, call.state != "ended" {
                     CallView(call: call)
@@ -27,6 +26,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(.background)
+        .ignoresSafeArea(.container, edges: .top)  // header shares the titlebar row
         .sheet(isPresented: $showSettings) { SettingsView() }
         .overlay(alignment: .top) {
             if let err = center.error {
@@ -49,29 +49,28 @@ struct StatusBar: View {
     @Binding var showSettings: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(center.phone.connected ? .green : (center.daemonOnline ? .orange : .secondary))
-                .frame(width: 8, height: 8)
-                .animation(.easeOut(duration: 0.2), value: center.phone.connected)
-            Text(statusText)
-                .font(.subheadline.weight(.medium))
-                .lineLimit(1)
+        HStack(spacing: 10) {
             Spacer()
-            if let s = center.phone.indicators?.signal { SignalBars(level: s) }
-            if let b = center.phone.indicators?.battchg { BatteryDot(level: b) }
-            Button { showSettings = true } label: {
-                Image(systemName: "gearshape").font(.system(size: 13))
+            if center.phone.connected {
+                if let s = center.phone.indicators?.signal { SignalBars(level: s) }
+                if let b = center.phone.indicators?.battchg { BatteryDot(level: b) }
             }
-            .buttonStyle(.plain).foregroundStyle(.secondary)
+            StatusChip(text: statusText, tint: tint)
+            CircleButton(symbol: "ellipsis", label: "Settings") { showSettings = true }
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
+        .padding(.leading, 82)  // the row is shared with the window's traffic lights
+        .padding(.trailing, 12)
+        .frame(height: 32)
+    }
+
+    private var tint: Color {
+        center.phone.connected ? .green : (center.daemonOnline ? .orange : .secondary)
     }
 
     private var statusText: String {
         if center.phone.connected {
             if let n = center.phone.name, !n.isEmpty { return n }
-            return center.phones.first(where: { $0.connected }).map(\.display) ?? "Phone connected"
+            return center.phones.first(where: { $0.connected }).map(\.display) ?? "Connected"
         }
         if !center.daemonOnline { return "Box offline" }
         return center.phones.isEmpty ? "No phone paired" : "Phone not connected"
@@ -96,5 +95,39 @@ struct BatteryDot: View {
     var body: some View {
         Image(systemName: level <= 1 ? "battery.25" : (level <= 3 ? "battery.50" : "battery.100"))
             .font(.system(size: 13)).foregroundStyle(.secondary)
+    }
+}
+
+/// Small status pill next to the wordmark: dot + who/what.
+struct StatusChip: View {
+    let text: String
+    let tint: Color
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(tint).frame(width: 6, height: 6)
+            Text(text).font(.caption.weight(.medium)).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(.quaternary.opacity(0.45), in: Capsule())
+        .animation(.easeOut(duration: 0.2), value: text)
+    }
+}
+
+/// Round icon button with a soft shadow instead of a border.
+struct CircleButton: View {
+    let symbol: String
+    let label: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, height: 26)
+                .background(.quaternary.opacity(0.45), in: Circle())
+        }
+        .buttonStyle(PressButtonStyle())
+        .help(label)
+        .accessibilityLabel(label)
     }
 }

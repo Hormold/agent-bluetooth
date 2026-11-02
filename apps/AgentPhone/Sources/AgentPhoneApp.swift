@@ -15,6 +15,7 @@ struct AgentPhoneApp: App {
                 }
                 .frame(minWidth: 360, idealWidth: 380, minHeight: 540, idealHeight: 600)
         }
+        .windowStyle(.hiddenTitleBar)  // the header carries the name; no duplicate title
         .windowResizability(.contentSize)
         .defaultSize(width: 380, height: 600)
     }

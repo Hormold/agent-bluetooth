@@ -1,19 +1,5 @@
 import SwiftUI
 
-struct CallButton: View {
-    let enabled: Bool
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "phone.fill").font(.system(size: 16, weight: .semibold))
-                .frame(width: 44, height: 44)
-                .background(enabled ? Color.green : Color.secondary.opacity(0.3), in: Circle())
-                .foregroundStyle(.white)
-        }
-        .buttonStyle(PressButtonStyle()).disabled(!enabled)
-    }
-}
-
 struct RoundIconButton: View {
     let symbol: String
     var tint: Color = .secondary

@@ -105,8 +105,10 @@ final class CallCenter: ObservableObject {
             async let h = try? api.history()
             async let i = try? api.directoryInfo()
             let (contacts, history, info) = await (c, h, i)
-            if let contacts { self.contacts = contacts }
-            if let history { self.history = history }
+            if DemoMode.directory == nil {  // demo screenshots keep their fake phonebook
+                if let contacts { self.contacts = contacts }
+                if let history { self.history = history }
+            }
             if let info { directory = info }
             if (contacts != nil || history != nil) && DemoMode.directory == nil {
                 DirectorySnapshot(contacts: self.contacts, history: self.history).save()
