@@ -229,9 +229,7 @@ class HttpApi:
         settings_validate(self.app, body)
         settings_apply(self.app, body)
         saved = settings_current(self.app)
-        self.app.settings.save(
-            {k: v for k, v in saved.items() if k not in {"summary", "rules"}}
-        )
+        self.app.settings.save({k: v for k, v in saved.items() if k != "summary"})
         return web.json_response(settings_current(self.app))
 
     async def token(self, request: web.Request) -> web.Response:

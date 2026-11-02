@@ -61,6 +61,17 @@ Use an existing, nonempty 16-bit PCM WAV, mono or stereo, at an absolute path
 on the daemon's machine. Incoming play mode answers immediately, plays once,
 then hangs up. First matching routing rules still take precedence.
 
+Route by caller (first match wins):
+
+```bash
+agent-bluetooth rules add when_contact=false mode=play play_file=/abs/greeting.wav
+agent-bluetooth rules add when_contact=true mode=app
+agent-bluetooth rules list
+```
+
+`status` shows each call's `name` and `contact` (true when the number is in the
+phone's contacts).
+
 For manual control, set `incoming=ignore`, then use `answer`, `play /abs/file.wav`
 or `bridge`. `answer=manual` currently behaves like auto for app/agent modes;
 use ignore to leave calls untouched. To configure room handling:

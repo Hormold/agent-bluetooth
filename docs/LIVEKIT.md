@@ -9,6 +9,8 @@ tools work without changes.
 - identity `phone`, `kind == PARTICIPANT_KIND_SIP`
 - attributes `sip.callID`, `sip.phoneNumber`, `sip.trunkID = agent-bluetooth`,
   and `sip.callStatus`, kept live: `dialing` / `ringing` → `active` → `hangup`
+- `phone.name` and `phone.contact` (`true` when the number is in the phone's
+  contacts; the name comes from there), so an agent can greet callers by name
 - audio: the line, 48 kHz mono
 
 ## DTMF

@@ -125,6 +125,7 @@ struct AppSettings: Decodable {
     var answer: String
     var livekit: LiveKit
     var summary: String?  // box's plain-words description of what happens on the next call
+    var rules: [CallRule]?
 }
 
 /// Server-side directory sync state (GET /api/directory).
@@ -199,4 +200,20 @@ struct AppPrefs: Codable {
 struct RadioError: Decodable, Equatable {
     var error: String
     var hint: String
+}
+
+/// Route a call by who calls (box setting `rules`, first match wins).
+struct CallRule: Codable, Equatable {
+    var direction: String?
+    var when_number: String?
+    var when_contact: Bool?
+    var mode: String?
+    var action: String?
+    var agent_name: String?
+    var play_file: String?
+
+    /// The one rule the app manages: what to do with numbers not in contacts.
+    var isUnknownNumbersRule: Bool {
+        when_contact == false && when_number == nil && (direction ?? "in") == "in"
+    }
 }

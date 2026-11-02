@@ -67,6 +67,16 @@ class BumblePbapDirectory:
             await self._sync_kind(kind)
         return self.data[kind]
 
+    def lookup(self, number: str) -> str | None:
+        """Contact name for a number, from the last sync (last 10 digits match)."""
+        key = _digits(number)
+        if len(key) < 7:
+            return None
+        for c in self.data["contacts"]:
+            if any(_digits(n) == key for n in c.get("numbers", [])):
+                return c.get("name") or None
+        return None
+
     def info(self) -> dict[str, Any]:
         return {
             "counts": {k: len(self.data[k]) for k in KINDS},
@@ -160,3 +170,7 @@ class BumblePbapDirectory:
         with os.fdopen(fd, "w") as f:
             json.dump({**self.data, "meta": self.meta}, f)
         os.replace(tmp, self.path)
+
+
+def _digits(number: str) -> str:
+    return "".join(ch for ch in number if ch.isdigit())[-10:]

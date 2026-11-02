@@ -58,11 +58,10 @@ def current(app: App) -> dict[str, Any]:
     ):
         descriptions.append(f"{label} calls: {_describe(r, mode, direction)}.")
         for rule in r.rules:
-            if rule.get("direction", "in") == direction:
+            if rule.get("direction", "in") in (direction, "any"):
                 action = rule.get("mode", rule.get("action", "app"))
                 descriptions.append(
-                    f"{label} rule {rule.get('when_number') or '*'}: "
-                    f"{_describe(r, action, direction)}."
+                    f"{label} from {_who(rule)}: {_describe(r, action, direction, rule)}."
                 )
     if r.rules:
         descriptions.append("The first matching rule overrides the direction default.")
@@ -79,19 +78,31 @@ def current(app: App) -> dict[str, Any]:
     return out
 
 
-def _describe(r, mode: str, direction: str) -> str:
+def _who(rule: dict[str, Any]) -> str:
+    parts = []
+    if "when_contact" in rule:
+        parts.append("contacts" if rule["when_contact"] else "numbers not in contacts")
+    if rule.get("when_number"):
+        parts.append(f"numbers matching {rule['when_number']}")
+    return " and ".join(parts) or "any number"
+
+
+def _describe(r, mode: str, direction: str, rule: dict[str, Any] | None = None) -> str:
+    rule = rule or {}
+    play_path = rule.get("play_file") or r.play_path
+    agent_name = rule.get("agent_name") or r.agent_name
     incoming = direction == "in"
     if mode == "ignore":
         return "left for manual control"
     if mode == "reject" and incoming:
         return "rejected without answering"
-    if mode == "play" and r.play_path:
+    if mode == "play" and play_path:
         start = "answered automatically and " if incoming else "when connected, "
-        return f"{start}{Path(r.play_path).name} is played, then hung up"
+        return f"{start}{Path(play_path).name} is played, then hung up"
     if mode == "record":
         start = "answered automatically and " if incoming else "when connected, "
         return f"{start}audio is recorded to {r.record_dir}"
-    if mode in ("app", "agent") or (mode == "play" and not r.play_path):
+    if mode in ("app", "agent") or (mode == "play" and not play_path):
         if not incoming:
             answer = "when connected, audio goes to a LiveKit room"
         elif r.answer_mode == "on_join":
@@ -100,8 +111,8 @@ def _describe(r, mode: str, direction: str) -> str:
             answer = "answered automatically; audio goes to a LiveKit room"
         if mode == "agent":
             answer += (
-                f"; dispatch agent {r.agent_name!r}"
-                if r.agent_name
+                f"; dispatch agent {agent_name!r}"
+                if agent_name
                 else "; no agent_name configured, so no agent is dispatched"
             )
         if mode == "play":
@@ -131,7 +142,7 @@ def validate_wav(path: str) -> None:
 def validate(app: App, data: dict[str, Any]) -> None:
     if not isinstance(data, dict):
         raise ValueError("Settings must be a JSON object")
-    unknown = set(data) - {*FIELDS, "livekit"}
+    unknown = set(data) - {*FIELDS, "livekit", "rules"}
     if unknown:
         raise ValueError(f"Unknown settings: {', '.join(sorted(unknown))}")
     for field in FIELDS:
@@ -164,6 +175,8 @@ def validate(app: App, data: dict[str, Any]) -> None:
                 raise ValueError(
                     f"livekit.{k} must start with ws://, wss://, http:// or https://"
                 )
+    if "rules" in data:
+        validate_rules(data["rules"], data.get("play_file") or app.router.play_path)
     merged = {**current(app), **data}
     if (
         merged["incoming"] == "play"
@@ -173,8 +186,51 @@ def validate(app: App, data: dict[str, Any]) -> None:
         validate_wav(merged["play_file"])
 
 
+RULE_KEYS = {
+    "direction",
+    "when_number",
+    "when_contact",
+    "mode",
+    "action",
+    "agent_name",
+    "play_file",
+}
+RULE_MODES = {"app", "agent", "play", "record", "reject", "ignore"}
+
+
+def validate_rules(rules: Any, default_play: str = "") -> None:
+    """Rules route a call by who calls. First match wins. Each rule:
+    {direction: in|out|any, when_number: glob, when_contact: bool,
+     mode: app|agent|play|record|reject|ignore, agent_name?, play_file?}"""
+    if not isinstance(rules, list):
+        raise ValueError("rules must be a list")
+    for i, rule in enumerate(rules):
+        where = f"rules[{i}]"
+        if not isinstance(rule, dict):
+            raise ValueError(f"{where} must be an object")
+        bad = set(rule) - RULE_KEYS
+        if bad:
+            raise ValueError(f"{where}: unknown keys {', '.join(sorted(bad))}")
+        mode = rule.get("mode", rule.get("action"))
+        if mode not in RULE_MODES:
+            raise ValueError(
+                f"{where}: mode must be one of {', '.join(sorted(RULE_MODES))}"
+            )
+        if rule.get("direction", "in") not in {"in", "out", "any"}:
+            raise ValueError(f"{where}: direction must be in, out or any")
+        if "when_contact" in rule and not isinstance(rule["when_contact"], bool):
+            raise ValueError(f"{where}: when_contact must be true or false")
+        for k in ("when_number", "agent_name", "play_file"):
+            if k in rule and not isinstance(rule[k], str):
+                raise ValueError(f"{where}: {k} must be a string")
+        if mode == "play":
+            validate_wav(rule.get("play_file") or default_play)
+
+
 def apply(app: App, data: dict[str, Any]) -> None:
     r = app.router
+    if "rules" in data:
+        r.rules = list(data["rules"])
     if "incoming" in data:
         r.incoming_mode = str(data["incoming"])
     if "outgoing" in data:

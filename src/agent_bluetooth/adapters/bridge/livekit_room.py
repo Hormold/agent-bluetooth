@@ -131,6 +131,7 @@ class LiveKitBridge:
                 "phone.call_id": call.id,
                 "phone.number": call.number,
                 "phone.name": call.name,
+                "phone.contact": "true" if call.contact else "false",
                 "phone.direction": call.direction,
             }
         )

@@ -34,11 +34,19 @@ ROOM_MODES = ("app", "agent")
 
 
 class CallRouter:
-    def __init__(self, ctx: Context, phone: Phone, bridge: Bridge, cfg: dict[str, Any]):
+    def __init__(
+        self,
+        ctx: Context,
+        phone: Phone,
+        bridge: Bridge,
+        cfg: dict[str, Any],
+        directory: Any = None,
+    ):
         self.ctx = ctx
         self.bus = ctx.bus
         self.phone = phone
         self.room_bridge = bridge  # LiveKit, used for app/agent modes
+        self.directory = directory  # optional: contact lookup by number
         self.answer_mode: str = cfg.get("answer", "on_join")
         self.incoming_mode: str = cfg.get("incoming", cfg.get("default", "app"))
         self.outgoing_mode: str = cfg.get("outgoing", "app")
@@ -109,7 +117,17 @@ class CallRouter:
     async def _apply(self, call: Call) -> None:
         if call.id in self.handlers:
             return
-        mode = self._mode_for(call)
+        if call.direction == "in" and not call.number and self._rules_need_caller():
+            await self._wait_for_number(call)
+        self._identify(call)
+        rule = self._rule_for(call)
+        mode = (
+            rule.get("mode", rule.get("action", "app"))
+            if rule
+            else self._default_mode(call)
+        )
+        agent_name = (rule or {}).get("agent_name") or self.agent_name
+        play_path = (rule or {}).get("play_file") or self.play_path
         log.info(
             "call %s (%s) from %s -> mode=%s",
             call.id,
@@ -123,29 +141,65 @@ class CallRouter:
         if mode == "ignore":
             return
         if mode in ROOM_MODES:
-            await self.route_to_room(call, agent=(mode == "agent"))
+            await self.route_to_room(
+                call, agent=(mode == "agent"), agent_name=agent_name
+            )
         elif mode == "play":
-            if self.play_path:
-                await self.play_file(call, self.play_path)
+            if play_path:
+                await self.play_file(call, play_path)
             else:
                 log.warning("play mode but no play_file set; falling back to app")
                 await self.route_to_room(call)
         elif mode == "record":
             await self.record(call)
 
-    def _mode_for(self, call: Call) -> str:
+    def _rule_for(self, call: Call) -> dict[str, Any] | None:
+        """First matching rule. Conditions (all optional): direction in|out|any,
+        when_number (glob on the number), when_contact (true/false)."""
         for rule in self.rules:
-            if call.direction != rule.get("direction", "in"):
+            direction = rule.get("direction", "in")
+            if direction != "any" and call.direction != direction:
                 continue
             pattern = rule.get("when_number")
             if pattern and not fnmatch.fnmatch(call.number or "", pattern):
                 continue
-            return rule.get("mode", rule.get("action", "app"))
+            if "when_contact" in rule and bool(rule["when_contact"]) != call.contact:
+                continue
+            return rule
+        return None
+
+    def _default_mode(self, call: Call) -> str:
         return self.incoming_mode if call.direction == "in" else self.outgoing_mode
 
+    def _rules_need_caller(self) -> bool:
+        return any("when_number" in r or "when_contact" in r for r in self.rules)
+
+    async def _wait_for_number(self, call: Call, timeout: float = 3.0) -> None:
+        """Caller id often lands a moment after the ring; rules need it."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline and not call.number:
+            await asyncio.sleep(0.2)
+            live = (self.phone.status() or {}).get("call") or {}
+            if live.get("id") == call.id and live.get("number"):
+                call.number = live["number"]
+                call.name = call.name or live.get("name", "")
+
+    def _identify(self, call: Call) -> None:
+        """Mark known contacts and fill the name from the phonebook."""
+        lookup = getattr(self.directory, "lookup", None)
+        if not lookup or not call.number:
+            return
+        name = lookup(call.number)
+        call.contact = name is not None
+        if name and not call.name:
+            call.name = name
+
     # handlers / runtime overrides (API + agent) ---------------------------
-    async def route_to_room(self, call: Call, agent: bool = False) -> dict[str, Any]:
-        self.room_bridge.agent_name = self.agent_name if agent else ""
+    async def route_to_room(
+        self, call: Call, agent: bool = False, agent_name: str = ""
+    ) -> dict[str, Any]:
+        self.room_bridge.agent_name = (agent_name or self.agent_name) if agent else ""
         self.handlers[call.id] = self.room_bridge
         info = await self._open_room(call)
         await self._answer_or_attach(call, self.room_bridge, answer_on_join=True)

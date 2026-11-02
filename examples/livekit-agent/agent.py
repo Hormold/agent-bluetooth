@@ -37,23 +37,27 @@ _DTMF = {str(n): n for n in range(10)} | {
 }
 
 
-def _caller_number(ctx: JobContext, participant) -> str:
-    number = (participant.attributes or {}).get("sip.phoneNumber") or ""
-    if number:
-        return number
+def _caller(ctx: JobContext, participant) -> tuple[str, str]:
+    """(number, contact name or ""). agent-bluetooth fills the name from the
+    phone's contacts and marks phone.contact=true when the caller is known."""
+    attrs = participant.attributes or {}
     try:
         meta = json.loads(ctx.job.metadata or "{}")
     except json.JSONDecodeError:
         meta = {}
-    return str(meta.get("number") or "unknown")
+    number = attrs.get("sip.phoneNumber") or str(meta.get("number") or "unknown")
+    known = attrs.get("phone.contact") == "true" or bool(meta.get("contact"))
+    name = (attrs.get("phone.name") or meta.get("name") or "") if known else ""
+    return number, name
 
 
 class Receptionist(Agent):
-    def __init__(self, caller: str) -> None:
+    def __init__(self, caller: str, name: str = "") -> None:
+        who = f"This is {name}, someone in the owner's contacts. " if name else ""
         super().__init__(
             instructions=(
                 "You are a phone receptionist on a live call. "
-                f"The caller's number is {caller}. "
+                f"The caller's number is {caller}. {who}"
                 "Greet them, then answer in one or two short spoken sentences. "
                 "No markdown, lists, or emojis. "
                 "Use press_keys to dial tones on this call, such as an IVR menu. "
@@ -71,12 +75,13 @@ class Receptionist(Agent):
             ],
         )
         self.caller = caller
+        self.name = name
 
     async def on_enter(self) -> None:
+        hello = f"Greet {self.name} by first name." if self.name else "Greet the caller."
         self.session.generate_reply(
             instructions=(
-                f"Greet the caller. Their number is {self.caller}. "
-                "Say you are the receptionist and ask how you can help. "
+                f"{hello} Say you are the receptionist and ask how you can help. "
                 "One short sentence."
             )
         )
@@ -105,10 +110,10 @@ server = AgentServer()
 @server.rtc_session(agent_name=AGENT_NAME)
 async def phone_receptionist(ctx: JobContext) -> None:
     phone = await ctx.wait_for_participant(identity="phone")
-    caller = _caller_number(ctx, phone)
-    log.info("call from %s in %s", caller, ctx.room.name)
+    caller, name = _caller(ctx, phone)
+    log.info("call from %s%s in %s", caller, f" ({name})" if name else "", ctx.room.name)
     session = AgentSession(llm=openai.realtime.RealtimeModel(voice="marin"))
-    await session.start(agent=Receptionist(caller), room=ctx.room)
+    await session.start(agent=Receptionist(caller, name), room=ctx.room)
 
 
 if __name__ == "__main__":

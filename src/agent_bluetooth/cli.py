@@ -175,6 +175,23 @@ def main() -> None:
         help="data key=value; repeat for AND; nested: call.number=+1555...",
     )
 
+    rules = sub.add_parser(
+        "rules",
+        help="route calls by who calls (first match wins)",
+        description="Examples: rules add when_contact=false mode=play play_file=/abs/stall.wav | "
+        "rules add when_contact=true mode=agent agent_name=receptionist | rules list | rules remove 0",
+    )
+    rules.add_argument(
+        "action", choices=["list", "add", "remove", "clear"], nargs="?", default="list"
+    )
+    rules.add_argument(
+        "values",
+        nargs="*",
+        help="add: key=value (direction, when_number, when_contact, mode, agent_name, play_file); remove: index",
+    )
+    rules.add_argument(
+        "--first", action="store_true", help="add: put the rule before existing ones"
+    )
     settings = sub.add_parser("settings", help="show or update call handling")
     settings.add_argument("action", nargs="?", choices=["set"])
     settings.add_argument(
@@ -248,6 +265,39 @@ def main() -> None:
             asyncio.run(_wait(args))
         except KeyboardInterrupt:
             _fail("Interrupted", code=130)
+    elif args.cmd == "rules":
+        current_rules = _req(args, "GET", "/api/settings").get("rules", [])
+        if args.action == "list":
+            _out(current_rules)
+        else:
+            if args.action == "add":
+                rule: dict = {}
+                for key, value in _pairs(args.values).items():
+                    rule[key] = (
+                        {"true": True, "false": False}.get(value.lower(), value)
+                        if key == "when_contact"
+                        else value
+                    )
+                new_rules = (
+                    [rule, *current_rules] if args.first else [*current_rules, rule]
+                )
+            elif args.action == "remove":
+                if (
+                    len(args.values) != 1
+                    or not args.values[0].isdigit()
+                    or int(args.values[0]) >= len(current_rules)
+                ):
+                    _fail(
+                        f"rules remove needs an index 0..{len(current_rules) - 1}",
+                        code=2,
+                    )
+                new_rules = [
+                    r for i, r in enumerate(current_rules) if i != int(args.values[0])
+                ]
+            else:
+                new_rules = []
+            saved = _req(args, "POST", "/api/settings", {"rules": new_rules})
+            _out({"rules": saved.get("rules", []), "summary": saved.get("summary", "")})
     elif args.cmd == "settings":
         if args.action == "set":
             if not args.values:

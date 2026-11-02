@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var draftKey = ""
     @State private var advanced = false
     @State private var baseline: AppSettings?  // what the box had when the form loaded
+    @State private var unknown = "same"          // numbers not in contacts: same | play | reject
 
     private struct Mode { let id, title, detail, symbol: String }
     private let modes = [
@@ -75,6 +76,21 @@ struct SettingsView: View {
                 .padding(10)
                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
             }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Numbers not in your contacts").font(.callout)
+                Picker("", selection: $unknown) {
+                    Text("Same as above").tag("same")
+                    Text("Play greeting").tag("play")
+                    Text("Decline").tag("reject")
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                .onChange(of: unknown) { _, _ in save() }
+                if unknown == "play" && playFile.isEmpty {
+                    Text("Choose a greeting under \u{201C}Play a greeting\u{201D} first.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+            .padding(.top, 4)
             if let summary = center.settings?.summary, !summary.isEmpty {
                 Text(summary).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -132,6 +148,7 @@ struct SettingsView: View {
             guard let s = await center.fetchSettings() else { return }
             mode = s.incoming; agentName = s.agent_name; playFile = s.play_file
             lkURL = s.livekit.url; lkKey = s.livekit.api_key; lkSecret = s.livekit.api_secret
+            unknown = s.rules?.first(where: \.isUnknownNumbersRule).flatMap { $0.mode ?? $0.action } ?? "same"
             baseline = s
         }
     }
@@ -164,6 +181,14 @@ struct SettingsView: View {
         }
         if agentName != s.agent_name { body["agent_name"] = agentName }
         if playFile != s.play_file { body["play_file"] = playFile }
+        let oldUnknown = s.rules?.first(where: \.isUnknownNumbersRule).flatMap { $0.mode ?? $0.action } ?? "same"
+        if unknown != oldUnknown && !(unknown == "play" && playFile.isEmpty) {
+            var rules = (s.rules ?? []).filter { !$0.isUnknownNumbersRule }
+            if unknown != "same" { rules.insert(CallRule(when_contact: false, mode: unknown), at: 0) }
+            if let data = try? JSONEncoder().encode(rules), let obj = try? JSONSerialization.jsonObject(with: data) {
+                body["rules"] = obj
+            }
+        }
         if lkURL != s.livekit.url || lkKey != s.livekit.api_key || lkSecret != s.livekit.api_secret {
             body["livekit"] = ["url": lkURL, "api_key": lkKey, "api_secret": lkSecret]
         }
@@ -171,6 +196,7 @@ struct SettingsView: View {
             center.saveSettings(body)
             baseline?.incoming = mode; baseline?.agent_name = agentName; baseline?.play_file = playFile
             baseline?.livekit.url = lkURL; baseline?.livekit.api_key = lkKey; baseline?.livekit.api_secret = lkSecret
+            Task { if let fresh = await center.fetchSettings() { baseline = fresh } }  // rules + summary from the box
         }
     }
 

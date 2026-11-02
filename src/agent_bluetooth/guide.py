@@ -50,6 +50,15 @@ for manual control, then answer/play/bridge explicitly. Read settings.summary
 and settings.rules: first matching config rule overrides the direction default.
 GET /api/settings reads these; POST /api/settings accepts a partial JSON object.
 
+Route by caller (first match wins; settings.rules, persisted):
+  agent-bluetooth rules add when_contact=false mode=play play_file=/abs/greeting.wav
+  agent-bluetooth rules add when_contact=true mode=agent agent_name=receptionist
+  agent-bluetooth rules add when_number='+1800*' mode=reject
+  agent-bluetooth rules list | rules remove 0 | rules clear
+Conditions: when_contact (from synced contacts), when_number (glob), direction
+in|out|any. Per-rule agent_name / play_file override the defaults. status shows
+each call's name and contact flag.
+
 Manual audio control:
   agent-bluetooth answer
   agent-bluetooth play /abs/greeting.wav

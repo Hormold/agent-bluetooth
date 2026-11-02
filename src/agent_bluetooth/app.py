@@ -46,7 +46,7 @@ class App:
         for sink in self.sinks:
             self.ctx.bus.subscribe(sink.handle)
         self.router = CallRouter(
-            self.ctx, self.phone, self.bridge, config.get("routing", {})
+            self.ctx, self.phone, self.bridge, config.get("routing", {}), self.directory
         )
         self.settings = SettingsStore(
             config.get("settings_file", "~/.agent-bluetooth/settings.json")

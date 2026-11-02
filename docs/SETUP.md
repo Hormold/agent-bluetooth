@@ -56,6 +56,19 @@ agent-bluetooth settings set incoming=agent agent_name=phone-receptionist
 agent-bluetooth settings set incoming=play play_file=/abs/path/greeting.wav
 ```
 
+Route by who calls (first match wins; unmatched calls use the mode above):
+
+```bash
+agent-bluetooth rules add when_contact=false mode=play play_file=/abs/path/greeting.wav
+agent-bluetooth rules add when_contact=true mode=agent agent_name=phone-receptionist
+agent-bluetooth rules add when_number='+1800*' mode=reject
+agent-bluetooth rules list          # or: rules remove 0 | rules clear
+```
+
+Conditions: `when_contact` (true/false, from the synced phonebook), `when_number`
+(glob), `direction` (in/out/any). A rule can carry its own `agent_name` or
+`play_file`.
+
 Modes: `app` (a person joins the call room), `agent` (a LiveKit agent is
 dispatched, see [LIVEKIT.md](LIVEKIT.md)), `play` (answer, play a 16-bit WAV,
 hang up), `record`, `reject`, `ignore`. The Mac app sets the same thing under
@@ -63,9 +76,10 @@ Settings > When someone calls.
 
 ## Phones
 
-Calls work with any phone that can use a Bluetooth headset. Android also gives
-SMS (send and receive), contacts and call history. iPhone gives calls,
-contacts and call history; Apple doesn't expose SMS over Bluetooth.
+Calls work with any phone that can use a Bluetooth headset. Android: SMS (send
+and receive), contacts and call history, tested. iPhone: calls, contacts and
+call history; iOS also shares messages with car kits over Bluetooth (MAP), but
+that path isn't tested here yet.
 
 ## Always-on box (Linux, systemd)
 

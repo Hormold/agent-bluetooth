@@ -3,6 +3,10 @@
 #   uv run agent-bluetooth config.demo.toml
 #   open http://localhost:8080 and press "call" under Simulate
 
+[directory]
+adapter = "fake"
+contacts = [{ name = "Anna Petrova", numbers = ["+14155550142"] }]
+
 [phone]
 adapter = "fake"
 
@@ -14,7 +18,7 @@ adapter = "livekit"          # LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRE
 
 [routing]
 answer = "on_join"           # auto | on_join | manual
-default = "room"
+incoming = "app"
 # Call control lives in routing rules (not automations), so the router doesn't
 # also open a room. Block toll-free spam:
 [[routing.rules]]

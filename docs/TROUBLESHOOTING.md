@@ -20,7 +20,7 @@ tail) and `agent-bluetooth logs -n 200`. If `phone.radio_error` is set, its
 | --- | --- |
 | Swapped dongles, phone won't connect | A new dongle has a new Bluetooth address. Forget "Agent Bluetooth" on the phone and pair again. (Moving the same dongle to another computer: copy `~/.agent-bluetooth/keys.json` along.) |
 | Contacts / history: `phone not connected` | They're read from the phone over Bluetooth; connect it first. After that they're served from the last sync. |
-| No SMS on iPhone | Apple doesn't expose SMS over Bluetooth. Calls, contacts and history work. |
+| No SMS on iPhone | On the iPhone, allow "Show Notifications" / messages for Agent Bluetooth in its Bluetooth settings. iPhone messaging over Bluetooth isn't tested here yet; Android is. |
 
 ## Calls and LiveKit
 

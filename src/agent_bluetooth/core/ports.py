@@ -28,6 +28,7 @@ class Call:
     number: str = ""
     name: str = ""
     state: str = "ringing"  # ringing | dialing | active | ended
+    contact: bool = False  # number is in the phone's contacts (name filled from there)
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     def to_dict(self) -> dict[str, Any]:

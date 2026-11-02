@@ -20,6 +20,7 @@ ADAPTERS: dict[str, dict[str, str]] = {
     },
     "directory": {
         "bumble-pbap": f"{_P}.directory.bumble_pbap:BumblePbapDirectory",
+        "fake": f"{_P}.directory.fake:FakeDirectory",
     },
     "bridge": {
         "livekit": f"{_P}.bridge.livekit_room:LiveKitBridge",
