@@ -42,9 +42,18 @@ class AudioPipe:
     side just reads and writes. Buffers are bounded so latency never grows.
     """
 
-    def __init__(self, sample_rate: int, max_buffer_ms: int = 200) -> None:
+    def __init__(
+        self, sample_rate: int, max_buffer_ms: int = 400, tx_prime_ms: int = 140
+    ) -> None:
         self.sample_rate = sample_rate
         self._max_bytes = sample_rate * PCM_BYTES_PER_SAMPLE * max_buffer_ms // 1000
+        # The phone pulls outgoing audio in USB-sized bursts (~128 ms at once)
+        # while bridges write in real time. Without a cushion every burst finds
+        # 20-40 ms buffered and the rest is padded with silence (choppy audio to
+        # the caller). So after running dry, wait until this much is queued.
+        self._tx_prime = sample_rate * PCM_BYTES_PER_SAMPLE * tx_prime_ms // 1000
+        self._tx_primed = False
+        self._closed = False
         self._from_phone: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=50)
         self._to_phone = bytearray()
         self.dropped = 0  # chunks from the phone dropped because the reader fell behind
@@ -61,6 +70,12 @@ class AudioPipe:
         self._from_phone.put_nowait(pcm)
 
     def pull_to_phone(self, nbytes: int) -> bytes:
+        if not self._tx_primed:
+            if len(self._to_phone) < self._tx_prime:
+                return b"\x00" * nbytes  # still filling the cushion
+            self._tx_primed = True
+        if len(self._to_phone) < nbytes:
+            self._tx_primed = False  # ran dry: rebuild the cushion before resuming
         chunk = bytes(self._to_phone[:nbytes])
         del self._to_phone[:nbytes]
         return chunk + b"\x00" * (nbytes - len(chunk))
@@ -88,6 +103,13 @@ class AudioPipe:
         return f"phone delivered {got:.1f}s of audio in {wall:.1f}s ({100 * got / max(wall, 0.01):.0f}%), dropped {self.dropped} chunks"
 
     def close(self) -> None:
+        """Signal end-of-audio. Safe to call twice and when nobody reads the
+        caller side (play mode leaves the queue full)."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._from_phone.full():
+            self._from_phone.get_nowait()
         self._from_phone.put_nowait(None)
 
     # bridge side -----------------------------------------------------------

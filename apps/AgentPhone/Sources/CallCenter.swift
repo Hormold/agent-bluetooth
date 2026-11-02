@@ -7,7 +7,9 @@ import SwiftUI
 @MainActor
 final class CallCenter: ObservableObject {
     @Published var phone = Phone(connected: false, peer: nil, call: nil, indicators: nil)
-    @Published var call: Call?
+    @Published var call: Call? {
+        didSet { alert.update(call) }  // ring + notify for incoming calls
+    }
     @Published var recents: [RecentCall] = []
     @Published var contacts: [Contact] = []
     @Published var history: [HistoryItem] = []
@@ -20,26 +22,29 @@ final class CallCenter: ObservableObject {
     @Published var error: String?
 
     @Published var host: String {
-        didSet { UserDefaults.standard.set(host, forKey: "host"); reconnect() }
+        didSet { savePrefs(); reconnect() }
     }
     @Published var apiKey: String {
-        didSet { UserDefaults.standard.set(apiKey, forKey: "key"); reconnect() }
+        didSet { savePrefs(); reconnect() }
     }
 
     let live = LiveKitRoom()
+    private let alert = IncomingCallAlert()
     private var api: APIClient
     private var stream: EventStream?
     private var poll: Timer?
 
     init() {
-        let h = UserDefaults.standard.string(forKey: "host") ?? "http://192.168.88.71:8080"
-        let k = UserDefaults.standard.string(forKey: "key") ?? ""
+        let prefs = AppPrefs.load()
+        let h = prefs.host, k = prefs.key
         host = h; apiKey = k
         api = APIClient(base: URL(string: h) ?? URL(string: "http://127.0.0.1:8080")!, key: k)
         // Ask for the mic up front so the first call can publish audio without a
         // mid-call permission stall.
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
         if let snap = DirectorySnapshot.load() { contacts = snap.contacts; history = snap.history }
+        alert.onAnswer = { [weak self] in self?.answer() }
+        alert.onDecline = { [weak self] in self?.hangup() }
         start()
     }
 
@@ -64,6 +69,8 @@ final class CallCenter: ObservableObject {
         _ = api  // silence capture note
         Task { await refresh() }
     }
+
+    private func savePrefs() { AppPrefs(host: host, key: apiKey).save() }
 
     func refresh() async {
         do {

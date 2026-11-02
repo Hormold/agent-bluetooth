@@ -164,3 +164,31 @@ struct BoxInfo: Decodable {
     var uptime_s: Int
     var config: Config
 }
+
+/// Box address + API key. A file in Application Support, not UserDefaults:
+/// sandboxed builds signed for local runs silently drop UserDefaults writes,
+/// so the address kept resetting on every launch.
+struct AppPrefs: Codable {
+    static let defaultHost = "http://127.0.0.1:8080"  // daemon on this Mac
+    var host: String = defaultHost
+    var key: String = ""
+
+    private static var url: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AgentPhone", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("prefs.json")
+    }
+
+    static func load() -> AppPrefs {
+        guard let data = try? Data(contentsOf: url),
+              var p = try? JSONDecoder().decode(AppPrefs.self, from: data) else { return AppPrefs() }
+        if p.host.trimmingCharacters(in: .whitespaces).isEmpty { p.host = defaultHost }
+        return p
+    }
+
+    func save() {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        try? data.write(to: Self.url, options: [.atomic, .completeFileProtection])
+    }
+}

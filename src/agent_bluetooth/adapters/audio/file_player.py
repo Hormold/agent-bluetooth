@@ -31,6 +31,10 @@ class FilePlayer:
         self._task: asyncio.Task | None = None
 
     async def attach_audio(self, call: Call, audio: AudioPipe) -> None:
+        # Audio-up is announced on answer and again when the call goes active:
+        # play once, never two overlapping copies into the same line.
+        if self._task and not self._task.done():
+            return
         pcm = _load_wav(self.path, audio.sample_rate)
         self._task = asyncio.create_task(self._play(call, audio, pcm))
 
@@ -52,13 +56,8 @@ class FilePlayer:
                 await asyncio.sleep(max(0, next_at - loop.time()))
             if not self.loop:
                 break
-        self.bus.publish(
-            E.CALL_AUDIO,
-            call=call.to_dict(),
-            up=True,
-            sample_rate=audio.sample_rate,
-            played=self.path,
-        )
+        # Let the cushion drain to the caller before reporting done / hanging up.
+        await asyncio.sleep(0.5)
         if self.hangup_after:
             self.bus.publish(E.PLAYBACK_DONE, call_id=call.id, file=self.path)
 

@@ -711,6 +711,8 @@ private struct SettingsView: View {
     @State private var lkURL = ""
     @State private var lkKey = ""
     @State private var lkSecret = ""
+    @State private var draftHost = ""
+    @State private var draftKey = ""
 
     private let modes: [(String, String, String)] = [
         ("app", "Answer in this app", "phone.circle"),
@@ -723,8 +725,8 @@ private struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 section("Box") {
-                    field("Address", text: $center.host, mono: true)
-                    field("API key (optional)", text: $center.apiKey)
+                    field("Address", text: $draftHost, mono: true, onSubmit: applyBox)
+                    field("API key (optional)", text: $draftKey, onSubmit: applyBox)
                     HStack(spacing: 6) {
                         Circle().fill(center.daemonOnline ? .green : .red).frame(width: 8, height: 8)
                         Text(center.daemonOnline ? "Connected" : "Not reachable")
@@ -773,12 +775,14 @@ private struct SettingsView: View {
         }
         .frame(width: 380, height: 560)
         .overlay(alignment: .topTrailing) {
-            Button("Done") { save(); dismiss() }.keyboardShortcut(.defaultAction).padding(12)
+            Button("Done") { applyBox(); save(); dismiss() }.keyboardShortcut(.defaultAction).padding(12)
         }
         .onAppear(perform: load)
     }
 
     private func load() {
+        draftHost = center.host
+        draftKey = center.apiKey
         center.loadDeviceState()
         if let s = center.settings {
             mode = s.incoming; agentName = s.agent_name
@@ -786,7 +790,22 @@ private struct SettingsView: View {
         }
     }
 
+    /// Connect to the typed address only when it's committed (Enter / Done),
+    /// not on every keystroke.
+    private func applyBox() {
+        let host = draftHost.trimmingCharacters(in: .whitespaces)
+        if !host.isEmpty, host != center.host { center.host = host }
+        if draftKey != center.apiKey { center.apiKey = draftKey }
+    }
+
+    /// Push call settings to the box only if they were loaded from it and the
+    /// user changed something. Otherwise Done would overwrite the box with
+    /// stale values (e.g. another machine's LiveKit address).
     private func save() {
+        guard let s = center.settings else { return }
+        let changed = mode != s.incoming || agentName != s.agent_name
+            || lkURL != s.livekit.url || lkKey != s.livekit.api_key || lkSecret != s.livekit.api_secret
+        guard changed else { return }
         center.saveSettings([
             "incoming": mode, "outgoing": mode, "agent_name": agentName,
             "answer": (mode == "app" || mode == "agent") ? "on_join" : "auto",
@@ -801,12 +820,14 @@ private struct SettingsView: View {
         }
     }
 
-    @ViewBuilder private func field(_ label: String, text: Binding<String>, mono: Bool = false) -> some View {
+    @ViewBuilder private func field(_ label: String, text: Binding<String>, mono: Bool = false,
+                                    onSubmit: @escaping () -> Void = {}) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label).font(.caption2).foregroundStyle(.tertiary)
             TextField("", text: text)
                 .textFieldStyle(.roundedBorder)
                 .font(mono ? .caption.monospaced() : .body)
+                .onSubmit(onSubmit)
         }
     }
 }
