@@ -4,6 +4,10 @@
 phone like a headset. Calls, texts and contacts become a CLI, an HTTP API and
 LiveKit rooms. No Twilio, no SIP trunk, no new number: your real one.
 
+<p>
+  <img src="docs/assets/terminal.png" alt="Claude texting through agent-bluetooth" width="62%">
+  <img src="docs/assets/app.png" alt="Agent Phone for macOS" width="34%">
+</p>
 
 - **Calls.** Dial and answer from code. Each call is a LiveKit room where the
   phone shows up as a SIP participant with native DTMF, so LiveKit telephony
