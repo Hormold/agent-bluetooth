@@ -8,6 +8,11 @@ struct AgentPhoneApp: App {
         Window("Agent Phone", id: "main") {
             ContentView()
                 .environmentObject(center)
+                .onAppear {
+                    #if DEBUG
+                    DebugSnapshot.startIfRequested()
+                    #endif
+                }
                 .frame(minWidth: 360, idealWidth: 380, minHeight: 540, idealHeight: 600)
         }
         .windowResizability(.contentSize)

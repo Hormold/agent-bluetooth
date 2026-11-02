@@ -1,64 +1,102 @@
-# Setup (real phone)
+# Setup
 
-1. **Dongle.** Plug a genuine CSR8510 USB Bluetooth dongle into the box.
-   Find its id: `lsusb` (e.g. `0a12:0001`).
+You need a USB Bluetooth dongle, a computer to plug it into (a Mac, or any
+Linux box), and a phone. The software drives the dongle directly over USB, so
+the computer's own Bluetooth stays out of it.
 
-2. **Deps.** `uv sync`. On Linux also: `apt install libusb-1.0-0`, and
-   `systemctl stop bluetooth` so it doesn't hold the dongle (we use libusb).
-
-3. **Config.** `cp config.example.toml config.toml` and set:
-   - `[bluetooth] transport` — `usb:<VID>:<PID>+sco=2` (the `+sco=2` enables call
-     audio; `usb:0` also works if it's the only dongle).
-   - `[bridge]` — your LiveKit `url` / `api_key` / `api_secret` (LiveKit Cloud,
-     or `livekit-server --dev` on the box).
-
-4. **Run.** `uv run agent-bluetooth serve config.toml`.
-   On your phone: Bluetooth → pair with **"Agent Bluetooth"**.
-
-5. **Keep it running** (Linux): a systemd unit with `Type=notify`,
-   `WatchdogSec=30`, `Restart=always`, and an `ExecStartPre` that reaps stale
-   processes / power-cycles the USB controller. Example in
-   [docs/systemd.md](systemd.md).
-
-## Choosing the call behaviour
-
-Set it once in `[routing]` (or live over `/api/settings`, or in the app):
-
-| mode | what happens on a call |
-| --- | --- |
-| `app` | audio → LiveKit room; a human joins to talk |
-| `agent` | audio → room + dispatch a LiveKit agent (`agent_name`), caller number in metadata |
-| `play` | play a WAV into the line |
-| `record` | record the call to a WAV |
-| `reject` | (incoming) hang up |
-
-## Running on a Mac (no Linux box)
-
-The dongle is driven straight over USB, so macOS works the same as Linux:
+## 1. Install
 
 ```bash
-brew install libusb livekit
-mkdir -p ~/.agent-bluetooth/rtl_bt   # Realtek firmware (TP-Link UB400 = RTL8761BU)
-curl -fsSLo ~/.agent-bluetooth/rtl_bt/rtl8761bu_fw.bin \
-  https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtl_bt/rtl8761bu_fw.bin
-curl -fsSLo ~/.agent-bluetooth/rtl_bt/rtl8761bu_config.bin \
-  https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtl_bt/rtl8761bu_config.bin
-
-livekit-server --dev --bind 127.0.0.1 --node-ip 127.0.0.1      # terminal 1
-BUMBLE_RTK_FIRMWARE_DIR=~/.agent-bluetooth/rtl_bt \
-  uv run agent-bluetooth serve config.toml                       # terminal 2
+git clone https://github.com/Hormold/agent-bluetooth && cd agent-bluetooth
+uv tool install .        # puts `agent-bluetooth` on PATH
 ```
 
-In `config.toml`: `transport = "usb:2357:0604+sco=2"`, LiveKit `url` and
-`client_url` = `ws://127.0.0.1:7880`. macOS leaves third-party dongles alone, so
-nothing needs to be disabled. Moving a dongle between machines keeps its
-Bluetooth address: copy `~/.agent-bluetooth/keys.json` along and the phone
-reconnects without pairing again.
+- **macOS:** `brew install libusb livekit`
+- **Linux:** `apt install libusb-1.0-0`, plus [livekit-server](https://docs.livekit.io/home/self-hosting/local/).
+  If the system Bluetooth service grabs the dongle, stop it or unbind the
+  kernel driver for that device.
 
-## Platform notes
+## 2. Configure
 
-- **Android**: SMS send/receive (MAP), contacts + call history (PBAP) all work.
-- **iPhone**: Apple blocks SMS over Bluetooth; use notifications instead (ANCS —
-  on the roadmap). Calls, contacts, call history work.
-- **Any phone with Bluetooth headset support** works for calls (hands-free profile).
-- **Built-in Bluetooth** (Mac or Pi) can't be used — plug in the USB dongle.
+```bash
+cp config.example.toml config.toml
+```
+
+Set `[bluetooth] transport` to your dongle: `usb:VID:PID+sco=2` (find VID:PID
+with `lsusb` on Linux or System Information > USB on macOS; `usb:0+sco=2` takes
+the first dongle). `+sco=2` turns on call audio.
+
+For LiveKit, the defaults point at a local dev server (`ws://127.0.0.1:7880`,
+`devkey` / `secret`). Use your LiveKit Cloud project instead if you have one.
+
+## 3. Run
+
+```bash
+livekit-server --dev --bind 127.0.0.1 --node-ip 127.0.0.1   # terminal 1
+agent-bluetooth serve config.toml                     # terminal 2
+```
+
+On the phone: Bluetooth settings, pair with **Agent Bluetooth**, allow access to
+contacts and messages. Then open the Mac app (`apps/AgentPhone`) or drive it
+from the CLI: `agent-bluetooth status`.
+
+If the radio doesn't come up, `agent-bluetooth status` shows
+`phone.radio_error` with the reason and what to do (wrong transport id, a
+vendor firmware file the dongle needs, another driver holding it).
+
+Tested with a TP-Link UB400 (current units are a Realtek RTL8761BU, which needs
+the `rtl8761bu_*` firmware files from linux-firmware) on macOS and an Orange Pi.
+
+## What happens on a call
+
+```bash
+agent-bluetooth settings                     # what happens now, in plain words
+agent-bluetooth settings set incoming=app    # ring in the app (default)
+agent-bluetooth settings set incoming=agent agent_name=phone-receptionist
+agent-bluetooth settings set incoming=play play_file=/abs/path/greeting.wav
+```
+
+Modes: `app` (a person joins the call room), `agent` (a LiveKit agent is
+dispatched, see [LIVEKIT.md](LIVEKIT.md)), `play` (answer, play a 16-bit WAV,
+hang up), `record`, `reject`, `ignore`. The Mac app sets the same thing under
+Settings > When someone calls.
+
+## Phones
+
+Calls work with any phone that can use a Bluetooth headset. Android also gives
+SMS (send and receive), contacts and call history. iPhone gives calls,
+contacts and call history; Apple doesn't expose SMS over Bluetooth.
+
+## Always-on box (Linux, systemd)
+
+The daemon speaks `Type=notify` with a watchdog, so systemd restarts it if it
+hangs:
+
+```ini
+# /etc/systemd/system/agent-bluetooth.service
+[Unit]
+Description=Agent Bluetooth
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=all
+WatchdogSec=30
+TimeoutStopSec=10
+KillMode=mixed
+WorkingDirectory=/opt/agent-bluetooth
+# path from `which agent-bluetooth`
+ExecStart=/root/.local/bin/agent-bluetooth serve config.toml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`systemctl daemon-reload && systemctl enable --now agent-bluetooth`
+
+`deploy/recover-usb.sh` is an optional `ExecStartPre` for boards whose USB
+controller can be reset from sysfs (it power-cycles the dongle's OHCI
+controller before each start). It's board-specific: read it before using it.

@@ -12,9 +12,11 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from ..core.events import E, Event
 from ..core.ports import Simulator
 from ..core.settings import apply as settings_apply
 from ..core.settings import current as settings_current
+from ..core.settings import validate as settings_validate
 
 if TYPE_CHECKING:
     from ..app import App
@@ -31,6 +33,8 @@ class HttpApi:
         self.api_key = cfg.get("api_key", "")
         self._runner: web.AppRunner | None = None
         self.started_at = time.time()
+        self.sms: deque[Event] = deque(maxlen=1000)
+        self.app.ctx.bus.subscribe(self._capture_sms)
         self.logs = _RingLog()
         logging.getLogger().addHandler(self.logs)
 
@@ -48,6 +52,7 @@ class HttpApi:
         r.add_post("/api/calls/bridge", self.bridge)
         r.add_post("/api/volume", self._cmd(lambda p, b: p.set_volume(int(b["level"]))))
         r.add_post("/api/sms", self.send_sms)
+        r.add_get("/api/sms", self.list_sms)
         r.add_get("/api/contacts", self.contacts)
         r.add_get("/api/calls/history", self.history)
         r.add_get("/api/directory", self.directory_info)
@@ -60,7 +65,7 @@ class HttpApi:
         r.add_post("/api/settings", self.set_settings)
         r.add_post("/api/token", self.token)
         r.add_post("/api/simulate/{kind}", self.simulate)
-        self._runner = web.AppRunner(server)
+        self._runner = web.AppRunner(server, handler_cancellation=True)
         await self._runner.setup()
         await web.TCPSite(self._runner, self.host, self.port).start()
         log.info("http api on http://%s:%s", self.host, self.port)
@@ -74,13 +79,17 @@ class HttpApi:
         if self.api_key and request.path.startswith("/api/"):
             given = request.headers.get("Authorization", "").removeprefix("Bearer ")
             if (given or request.query.get("key")) != self.api_key:
-                raise web.HTTPUnauthorized(text="bad api key")
+                return web.json_response({"error": "bad api key"}, status=401)
         try:
             return await handler(request)
+        except (ValueError, KeyError) as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except web.HTTPException as e:
+            return web.json_response({"error": e.text}, status=e.status)
         except RuntimeError as e:
             # Adapters raise RuntimeError for "not right now" (phone not connected):
             # that's a 503 the client can show, not a server crash.
-            raise web.HTTPServiceUnavailable(text=str(e)) from e
+            return web.json_response({"error": str(e)}, status=503)
 
     # handlers --------------------------------------------------------------
     async def status(self, _: web.Request) -> web.Response:
@@ -104,10 +113,13 @@ class HttpApi:
             headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
         )
         await resp.prepare(request)
-        async for event in self.app.ctx.bus.stream():
-            await resp.write(
-                f"event: {event.type}\ndata: {json.dumps(event.to_dict())}\n\n".encode()
-            )
+        try:
+            async for event in self.app.ctx.bus.stream():
+                await resp.write(
+                    f"event: {event.type}\ndata: {json.dumps(event.to_dict())}\n\n".encode()
+                )
+        except ConnectionResetError:
+            pass  # A wait/watch client finished and closed its stream.
         return resp
 
     async def dial(self, request: web.Request) -> web.Response:
@@ -137,6 +149,16 @@ class HttpApi:
         body = await request.json()
         await self.app.messages.send(body["to"], body["text"])
         return web.json_response({"ok": True})
+
+    async def _capture_sms(self, event: Event) -> None:
+        if event.type in (E.SMS_RECEIVED, E.SMS_SENT):
+            self.sms.appendleft(event)
+
+    async def list_sms(self, request: web.Request) -> web.Response:
+        limit = int(request.query.get("limit", "20"))
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        return web.json_response([e.to_dict() for e in list(self.sms)[:limit]])
 
     def _directory(self):
         if self.app.directory is None:
@@ -204,8 +226,12 @@ class HttpApi:
 
     async def set_settings(self, request: web.Request) -> web.Response:
         body = await request.json()
+        settings_validate(self.app, body)
         settings_apply(self.app, body)
-        self.app.settings.save(settings_current(self.app))
+        saved = settings_current(self.app)
+        self.app.settings.save(
+            {k: v for k, v in saved.items() if k not in {"summary", "rules"}}
+        )
         return web.json_response(settings_current(self.app))
 
     async def token(self, request: web.Request) -> web.Response:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -49,7 +50,127 @@ def current(app: App) -> dict[str, Any]:
     }
     b = app.bridge
     out["livekit"] = {f: getattr(b, f, "") for f in LIVEKIT_FIELDS}
+    out["rules"] = r.rules
+    descriptions = []
+    for label, direction, mode in (
+        ("Incoming", "in", r.incoming_mode),
+        ("Outgoing", "out", r.outgoing_mode),
+    ):
+        descriptions.append(f"{label} calls: {_describe(r, mode, direction)}.")
+        for rule in r.rules:
+            if rule.get("direction", "in") == direction:
+                action = rule.get("mode", rule.get("action", "app"))
+                descriptions.append(
+                    f"{label} rule {rule.get('when_number') or '*'}: "
+                    f"{_describe(r, action, direction)}."
+                )
+    if r.rules:
+        descriptions.append("The first matching rule overrides the direction default.")
+    if r.answer_mode == "manual":
+        descriptions.append(
+            "answer=manual currently answers app/agent calls immediately; use incoming=ignore for manual control."
+        )
+    bridge = app.config.get("bridge", {}).get("adapter", "livekit")
+    if bridge != "livekit":
+        descriptions.append(
+            f"Bridge adapter is {bridge!r}; LiveKit room behavior requires the livekit adapter."
+        )
+    out["summary"] = " ".join(descriptions)
     return out
+
+
+def _describe(r, mode: str, direction: str) -> str:
+    incoming = direction == "in"
+    if mode == "ignore":
+        return "left for manual control"
+    if mode == "reject" and incoming:
+        return "rejected without answering"
+    if mode == "play" and r.play_path:
+        start = "answered automatically and " if incoming else "when connected, "
+        return f"{start}{Path(r.play_path).name} is played, then hung up"
+    if mode == "record":
+        start = "answered automatically and " if incoming else "when connected, "
+        return f"{start}audio is recorded to {r.record_dir}"
+    if mode in ("app", "agent") or (mode == "play" and not r.play_path):
+        if not incoming:
+            answer = "when connected, audio goes to a LiveKit room"
+        elif r.answer_mode == "on_join":
+            answer = "a LiveKit room opens; answered when a participant joins"
+        else:
+            answer = "answered automatically; audio goes to a LiveKit room"
+        if mode == "agent":
+            answer += (
+                f"; dispatch agent {r.agent_name!r}"
+                if r.agent_name
+                else "; no agent_name configured, so no agent is dispatched"
+            )
+        if mode == "play":
+            answer += "; no play_file configured, so room fallback is used"
+        return answer
+    return f"no automatic handling for mode {mode!r}; use app, agent, play, record or ignore"
+
+
+def validate_wav(path: str) -> None:
+    """Validate on the daemon, where playback will read the file."""
+    if not path or not Path(path).is_absolute():
+        raise ValueError("play_file must be an absolute path on the daemon's machine")
+    try:
+        with wave.open(path, "rb") as wav:
+            if wav.getsampwidth() != 2 or wav.getcomptype() != "NONE":
+                raise ValueError("play_file must be an uncompressed 16-bit PCM WAV")
+            if wav.getnchannels() not in (1, 2):
+                raise ValueError("play_file must be a mono or stereo 16-bit PCM WAV")
+            if not wav.getnframes() or len(wav.readframes(1)) != 2 * wav.getnchannels():
+                raise ValueError("play_file contains no readable audio frames")
+    except (OSError, wave.Error, EOFError) as exc:
+        raise ValueError(
+            f"Cannot read play_file {path!r}: use an existing, readable 16-bit PCM WAV"
+        ) from exc
+
+
+def validate(app: App, data: dict[str, Any]) -> None:
+    if not isinstance(data, dict):
+        raise ValueError("Settings must be a JSON object")
+    unknown = set(data) - {*FIELDS, "livekit"}
+    if unknown:
+        raise ValueError(f"Unknown settings: {', '.join(sorted(unknown))}")
+    for field in FIELDS:
+        if field in data and not isinstance(data[field], str):
+            raise ValueError(f"{field} must be a string")
+    modes = {"app", "agent", "play", "record", "ignore"}
+    for field in ("incoming", "outgoing"):
+        allowed = modes | ({"reject"} if field == "incoming" else set())
+        if field in data and data[field] not in allowed:
+            raise ValueError(f"{field} must be one of: {', '.join(sorted(allowed))}")
+    if "answer" in data and data["answer"] not in {"auto", "on_join", "manual"}:
+        raise ValueError(
+            "answer must be auto, on_join or manual; use incoming=ignore for manual call control"
+        )
+    if "livekit" in data:
+        lk = data["livekit"]
+        if not isinstance(lk, dict):
+            raise ValueError("livekit must be a JSON object")
+        bad = set(lk) - set(LIVEKIT_FIELDS)
+        if bad:
+            raise ValueError(
+                f"Unknown livekit settings: {', '.join(sorted(bad))} (use {', '.join(LIVEKIT_FIELDS)})"
+            )
+        for k, v in lk.items():
+            if not isinstance(v, str):
+                raise ValueError(f"livekit.{k} must be a string")
+        for k in ("url", "client_url"):
+            v = lk.get(k)
+            if v and not v.startswith(("ws://", "wss://", "http://", "https://")):
+                raise ValueError(
+                    f"livekit.{k} must start with ws://, wss://, http:// or https://"
+                )
+    merged = {**current(app), **data}
+    if (
+        merged["incoming"] == "play"
+        or merged["outgoing"] == "play"
+        or data.get("play_file")
+    ):
+        validate_wav(merged["play_file"])
 
 
 def apply(app: App, data: dict[str, Any]) -> None:
@@ -64,7 +185,16 @@ def apply(app: App, data: dict[str, Any]) -> None:
         r.play_path = str(data["play_file"])
     if "answer" in data:
         r.answer_mode = str(data["answer"])
-    lk = data.get("livekit") or {}
+    lk = dict(data.get("livekit") or {})
+    bridge = app.bridge
+    # client_url (what apps connect to) usually just mirrors url. If it did,
+    # move it along with url; keep it only if it was set to something else.
+    if (
+        lk.get("url")
+        and "client_url" not in lk
+        and getattr(bridge, "client_url", None) == getattr(bridge, "url", None)
+    ):
+        lk["client_url"] = lk["url"]
     for f in LIVEKIT_FIELDS:
         if f in lk and lk[f]:
-            setattr(app.bridge, f, str(lk[f]))
+            setattr(bridge, f, str(lk[f]))

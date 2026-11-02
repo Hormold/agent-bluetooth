@@ -1,84 +1,61 @@
-# Real phone over Bluetooth. Copy to config.toml and edit.
+# Copy to config.toml. Usually only `transport` needs changing.
 
 [bluetooth]
-transport = "usb:0"          # USB dongle. Linux built-in: "hci-socket:0" (stop bluetoothd for it)
+transport = "usb:0+sco=2"    # first USB dongle; or "usb:VID:PID+sco=2". +sco=2 = call audio
 name = "Agent Bluetooth"     # what the phone shows when pairing
 keystore = "~/.agent-bluetooth/keys.json"
 
 [phone]
-adapter = "bumble-hfp"       # calls + call audio via Hands-Free Profile
-reconnect_every = 30         # seconds; re-dial the paired phone after restarts
+adapter = "bumble-hfp"       # calls + call audio (hands-free profile)
 
 [messages]
-adapter = "bumble-map"       # SMS via Message Access Profile; "none" to disable
-poll_every = 5
-fetch_full = false           # true = fetch whole text (marks SMS read on most phones)
+adapter = "bumble-map"       # SMS (Android); "none" to disable
+fetch_full = false           # true = full text, but marks messages read on most phones
+
+[directory]
+adapter = "bumble-pbap"      # contacts + call history
 
 [bridge]
 adapter = "livekit"
-url = "${LIVEKIT_URL}"                 # wss://xxx.livekit.cloud or ws://localhost:7880
-api_key = "${LIVEKIT_API_KEY}"
-api_secret = "${LIVEKIT_API_SECRET}"
-# client_url = "ws://192.168.1.10:7880"  # what browsers use, if different from url
-room_prefix = "call-"
-# agent_name = "my-agent"              # dispatch a LiveKit agent into every call room
+url = "${LIVEKIT_URL:-ws://127.0.0.1:7880}"          # local `livekit-server --dev`, or wss://xxx.livekit.cloud
+api_key = "${LIVEKIT_API_KEY:-devkey}"
+api_secret = "${LIVEKIT_API_SECRET:-secret}"
+# client_url = "ws://192.168.1.10:7880"             # what other machines use, if different from url
 
 [routing]
-answer = "on_join"           # auto: pick up at once | on_join: when someone joins | manual
-hangup_on_empty = true       # hang up when the last person/agent leaves the room
+answer = "on_join"           # pick up when someone (you or an agent) joins the call room
+
+[http]
+host = "127.0.0.1"           # "0.0.0.0" to reach it from other machines (then set api_key)
+port = 8080
+api_key = "${AGENT_BLUETOOTH_KEY:-}"
 
 [[sinks]]
 adapter = "log"
 
-[[sinks]]
-adapter = "telegram"
-bot_token = "${TELEGRAM_BOT_TOKEN}"
-chat_id = "${TELEGRAM_CHAT_ID}"
-web_url = "http://raspberrypi.local:8080"   # adds a "Join the call" link
-
+# Forward events somewhere:
 # [[sinks]]
 # adapter = "webhook"
 # url = "https://example.com/hook"
 # events = ["sms.received", "call.ringing"]   # empty = everything
+#
+# [[sinks]]
+# adapter = "telegram"
+# bot_token = "${TELEGRAM_BOT_TOKEN}"
+# chat_id = "${TELEGRAM_CHAT_ID}"
 
-[http]
-host = "0.0.0.0"
-port = 8080
-api_key = "${AGENT_BLUETOOTH_KEY:-}"         # set it if the box is reachable from outside
-
-# ── Automations: on event X, do side-effect Y (templated with {{vars}}) ──
-# For notify / forward / auto-reply. Answering/blocking calls: use
-# [[routing.rules]] instead so the router doesn't also open a room.
-# Vars available: every event field, plus call fields (number, name, state),
-# plus any you pull out with `extract` (regex, first capture group).
+# Automations: on event X, do Y. Vars: every event field + `extract` regex groups.
 # Actions: log | shell | webhook | telegram | sms | hangup | answer | play | bridge
-
-# Forward one-time codes from any SMS to Telegram:
+#
 # [[automations]]
 # name = "otp-to-telegram"
 # on = "sms.received"
-# extract = { code = "(\\d{4,8})" }      # literal regex, not semantic parsing
+# extract = { code = "(\\d{4,8})" }
 # do = "telegram"
-# text = "🔐 {{code}} (from {{sender}})"  # reuses the telegram sink's bot_token/chat_id
-
-# Forward only bank notifications (iPhone, via the ANCS adapter when added):
+# text = "{{code}} from {{sender}}"
+#
 # [[automations]]
-# name = "bank-alerts"
-# on = "notification.received"
-# when = { app = "*Bank*" }
-# do = "webhook"
-# url = "https://example.com/hook"
-
-# Auto-reply to SMS while driving:
-# [[automations]]
-# name = "driving"
-# on = "sms.received"
-# do = "sms"                               # `to` defaults to the sender
-# text = "Driving, will call back. (auto)"
-
-# Run a script on a missed/ended call (vars come in as AB_* env):
-# [[automations]]
-# name = "log-call"
+# name = "log-calls"
 # on = "call.ended"
 # do = "shell"
 # cmd = "echo \"$AB_NUMBER $AB_STATE\" >> ~/calls.log"

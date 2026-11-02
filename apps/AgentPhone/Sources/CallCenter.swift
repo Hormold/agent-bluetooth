@@ -11,12 +11,17 @@ final class CallCenter: ObservableObject {
         didSet { alert.update(call) }  // ring + notify for incoming calls
     }
     @Published var recents: [RecentCall] = []
-    @Published var contacts: [Contact] = []
+    @Published var contacts: [Contact] = [] {
+        didSet { contactIndexCount = -1 }  // names/numbers may change without the count changing
+    }
     @Published var history: [HistoryItem] = []
     @Published var directory: DirectoryInfo?
     @Published var box: BoxInfo?
     @Published var activity: [Event] = []
     @Published var phones: [PairedPhone] = []
+    @Published var phonesLoaded = false
+    private var contactIndex: [String: String] = [:]
+    private var contactIndexCount = -1  // don't claim "pair your phone" before we know
     @Published var settings: AppSettings?
     @Published var daemonOnline = false
     @Published var error: String?
@@ -35,14 +40,17 @@ final class CallCenter: ObservableObject {
     private var poll: Timer?
 
     init() {
-        let prefs = AppPrefs.load()
+        var prefs = AppPrefs.load()
+        #if DEBUG
+        if let demoHost = DemoMode.host { prefs.host = demoHost }  // screenshots: never saved
+        #endif
         let h = prefs.host, k = prefs.key
         host = h; apiKey = k
         api = APIClient(base: URL(string: h) ?? URL(string: "http://127.0.0.1:8080")!, key: k)
         // Ask for the mic up front so the first call can publish audio without a
         // mid-call permission stall.
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
-        if let snap = DirectorySnapshot.load() { contacts = snap.contacts; history = snap.history }
+        if let snap = DemoMode.directory ?? DirectorySnapshot.load() { contacts = snap.contacts; history = snap.history }
         alert.onAnswer = { [weak self] in self?.answer() }
         alert.onDecline = { [weak self] in self?.hangup() }
         start()
@@ -70,7 +78,9 @@ final class CallCenter: ObservableObject {
         Task { await refresh() }
     }
 
-    private func savePrefs() { AppPrefs(host: host, key: apiKey).save() }
+    private func savePrefs() {
+        if DemoMode.host == nil { AppPrefs(host: host, key: apiKey).save() }
+    }
 
     func refresh() async {
         do {
@@ -78,6 +88,7 @@ final class CallCenter: ObservableObject {
             phone = st.phone
             // Prefer calls[] — it carries the LiveKit room name; phone.call does not.
             call = st.calls.first ?? st.phone.call
+            if !daemonOnline { loadDeviceState() }  // just found the box: learn paired phones
             daemonOnline = true
         } catch {
             daemonOnline = false
@@ -97,10 +108,30 @@ final class CallCenter: ObservableObject {
             if let contacts { self.contacts = contacts }
             if let history { self.history = history }
             if let info { directory = info }
-            if contacts != nil || history != nil {
+            if (contacts != nil || history != nil) && DemoMode.directory == nil {
                 DirectorySnapshot(contacts: self.contacts, history: self.history).save()
             }
         }
+    }
+
+    /// Name from the phonebook for a number (matched on the last 10 digits).
+    func contactName(for number: String) -> String? {
+        let key = String(number.filter(\.isNumber).suffix(10))
+        guard key.count >= 7 else { return nil }
+        if contactIndexCount != contacts.count { rebuildContactIndex() }
+        return contactIndex[key]
+    }
+
+    private func rebuildContactIndex() {
+        var idx: [String: String] = [:]
+        for c in contacts {
+            for n in c.numbers {
+                let k = String(n.filter(\.isNumber).suffix(10))
+                if k.count >= 7, idx[k] == nil { idx[k] = c.name }
+            }
+        }
+        contactIndex = idx
+        contactIndexCount = contacts.count
     }
 
     func syncDirectory() {
@@ -124,8 +155,16 @@ final class CallCenter: ObservableObject {
     }
 
     func loadDeviceState() {
-        Task { if let p = try? await api.phones() { phones = p } }
+        Task { if let p = try? await api.phones() { phones = p; phonesLoaded = true } }
         Task { if let s = try? await api.settings() { settings = s } }
+    }
+
+    /// Fresh settings from the box (nil if unreachable). The settings form
+    /// waits for this so it never starts editing from stale or empty values.
+    func fetchSettings() async -> AppSettings? {
+        guard let s = try? await api.settings() else { return nil }
+        settings = s
+        return s
     }
 
     func pairNewPhone() { run { try await self.api.pair() } }

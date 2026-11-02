@@ -19,7 +19,7 @@ from bumble.device import Connection, ScoLink
 from ...core.context import Context
 from ...core.events import E
 from ...core.ports import AudioPipe, Call
-from ..bumble.radio import BumbleRadio
+from ..bumble.radio import BumbleRadio, RadioProblem
 
 log = logging.getLogger(__name__)
 CVSD_RATE = 8000
@@ -110,6 +110,7 @@ class BumbleHfpPhone:
         return {
             "adapter": "bumble-hfp",
             "radio": self.radio is not None,
+            "radio_error": RadioProblem.as_dict(),
             "name": self.radio.peer_names.get(str(self.connection.peer_address), "")
             if self.radio and self.connection
             else "",

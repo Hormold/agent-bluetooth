@@ -1,41 +1,16 @@
-"""agent-bluetooth: one CLI for agents to drive a phone over Bluetooth.
-
-The daemon runs the radio + LiveKit bridge + HTTP API:
-    agent-bluetooth serve [config.toml]
-
-Every other verb is a thin client over that daemon's HTTP API, so an agent
-scripts the phone the same way it scripts a browser:
-
-    agent-bluetooth status                 # phone + current calls, as JSON
-    agent-bluetooth watch                  # live event stream, one JSON per line
-    agent-bluetooth watch sms call         # only these event families
-    agent-bluetooth call <number>          # place a call
-    agent-bluetooth answer                 # answer the ringing call
-    agent-bluetooth hangup                 # hang up / reject
-    agent-bluetooth play <file.wav>        # answer and play a WAV into the line
-    agent-bluetooth bridge                 # answer and move audio into a LiveKit room
-    agent-bluetooth join [identity]        # print LiveKit url+token to join the call
-    agent-bluetooth dtmf <digits>
-    agent-bluetooth sms <to> <text...>     # send an SMS
-    agent-bluetooth sim call|sms|...       # inject fake traffic (fake adapters)
-    agent-bluetooth contacts [query]       # phonebook (last sync, instant)
-    agent-bluetooth history                # recent calls from the phone
-    agent-bluetooth sync                   # re-pull contacts + history now
-    agent-bluetooth debug                  # everything: phone, radio, sync, calls, events, logs
-    agent-bluetooth logs [-n 100]          # daemon log tail (no SSH needed)
-
-Target a remote box with --host / --key (or AGENT_BLUETOOTH_HOST / _KEY).
-Agents: run `agent-bluetooth guide` for the full recipe.
-"""
+"""Drive a phone through the daemon HTTP API. Run guide for recipes."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import math
 import os
-import sys
 import urllib.error
 import urllib.request
+
+import aiohttp
 
 from .guide import GUIDE
 
@@ -51,22 +26,99 @@ def _req(args: argparse.Namespace, method: str, path: str, body: dict | None = N
         with urllib.request.urlopen(req, timeout=args.timeout) as r:
             return json.loads(r.read() or "{}")
     except urllib.error.HTTPError as e:
-        sys.exit(f"error {e.code}: {e.read().decode().strip()}")
+        _fail(e.read().decode().strip(), status=e.code)
     except urllib.error.URLError as e:
-        sys.exit(
-            f"cannot reach daemon at {args.host}: {e.reason}\nstart it with: agent-bluetooth serve"
+        _fail(
+            f"Cannot reach daemon at {args.host}: {e.reason}. Start agent-bluetooth serve."
         )
+    except (TimeoutError, OSError) as e:
+        _fail(f"Request to {args.host} failed: {e}")
 
 
 def _out(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
+def _fail(message: str, code: int = 1, **details) -> None:
+    try:
+        message = json.loads(message).get("error", message)
+    except (ValueError, AttributeError):
+        pass
+    _out({"error": message, **details})
+    raise SystemExit(code)
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        _fail(message, code=2)
+
+
+def _pairs(values: list[str]) -> dict[str, str]:
+    result = {}
+    for item in values:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            _fail(f"Expected key=value, got {item!r}", code=2)
+        result[key] = value
+    return result
+
+
+def _positive(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a positive finite number")
+    return number
+
+
+def _matches(event: dict, filters: dict[str, str]) -> bool:
+    for key, expected in filters.items():
+        value = (
+            event if key.startswith("data.") or key in {"type", "ts"} else event["data"]
+        )
+        for part in key.split("."):
+            if not isinstance(value, dict) or part not in value:
+                return False
+            value = value[part]
+        actual = json.dumps(value) if not isinstance(value, str) else value
+        if actual != expected:
+            return False
+    return True
+
+
+async def _wait(args: argparse.Namespace) -> None:
+    filters = _pairs(args.match)
+    headers = {"Accept": "text/event-stream"}
+    if args.key:
+        headers["Authorization"] = f"Bearer {args.key}"
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=args.wait_timeout), headers=headers
+        ) as client:
+            async with client.get(f"{args.host.rstrip('/')}/api/events") as response:
+                if response.status >= 400:
+                    _fail(await response.text(), status=response.status)
+                async for raw in response.content:
+                    line = raw.decode().strip()
+                    if line.startswith("data:"):
+                        event = json.loads(line[5:].strip())
+                        if event["type"] == args.event_type and _matches(
+                            event, filters
+                        ):
+                            _out(event)
+                            return
+                _fail("Event stream closed before a matching event arrived")
+    except TimeoutError:
+        _fail(
+            f"Timed out after {args.wait_timeout:g}s waiting for {args.event_type}",
+            code=1,
+        )
+    except (aiohttp.ClientError, OSError) as e:
+        _fail(f"Cannot read events from {args.host}: {e}")
+
+
 def _watch(args: argparse.Namespace) -> None:
     families = set(args.families)
-    url = f"{args.host.rstrip('/')}/api/events" + (
-        f"?key={args.key}" if args.key else ""
-    )
+    url = f"{args.host.rstrip('/')}/api/events"
     req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
     if args.key:
         req.add_header("Authorization", f"Bearer {args.key}")
@@ -80,13 +132,15 @@ def _watch(args: argparse.Namespace) -> None:
                 if not families or event["type"].split(".")[0] in families:
                     print(json.dumps(event, ensure_ascii=False), flush=True)
     except urllib.error.URLError as e:
-        sys.exit(f"cannot reach daemon at {args.host}: {e.reason}")
+        _fail(f"Cannot reach daemon at {args.host}: {e.reason}")
+    except OSError as e:
+        _fail(f"Cannot read events from {args.host}: {e}")
     except KeyboardInterrupt:
         pass
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog="agent-bluetooth",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -96,7 +150,7 @@ def main() -> None:
         default=os.environ.get("AGENT_BLUETOOTH_HOST", "http://127.0.0.1:8080"),
     )
     p.add_argument("--key", default=os.environ.get("AGENT_BLUETOOTH_KEY", ""))
-    p.add_argument("--timeout", type=float, default=15)
+    p.add_argument("--timeout", type=_positive, default=15)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="run the daemon")
@@ -108,6 +162,26 @@ def main() -> None:
 
     w = sub.add_parser("watch", help="stream events as JSON lines")
     w.add_argument("families", nargs="*", help="filter: phone call room sms playback")
+
+    wait = sub.add_parser(
+        "wait", help="wait for one matching live event; timeout exits 1"
+    )
+    wait.add_argument("event_type", help="exact type, e.g. call.active")
+    wait.add_argument("--timeout", dest="wait_timeout", type=_positive, default=60)
+    wait.add_argument(
+        "--match",
+        action="append",
+        default=[],
+        help="data key=value; repeat for AND; nested: call.number=+1555...",
+    )
+
+    settings = sub.add_parser("settings", help="show or update call handling")
+    settings.add_argument("action", nargs="?", choices=["set"])
+    settings.add_argument(
+        "values",
+        nargs="*",
+        help="incoming/outgoing=app|agent|play|record|ignore; incoming=reject; agent_name, play_file, answer=auto|on_join|manual",
+    )
 
     c = sub.add_parser("call", help="place an outgoing call")
     c.add_argument("number")
@@ -135,9 +209,10 @@ def main() -> None:
     v = sub.add_parser("volume", help="set speaker volume 0..15")
     v.add_argument("level", type=int)
 
-    sm = sub.add_parser("sms", help="send an SMS")
+    sm = sub.add_parser("sms", help="send: sms <to> <text>; read: sms list [-n 20]")
     sm.add_argument("to")
-    sm.add_argument("text", nargs="+")
+    sm.add_argument("text", nargs="*")
+    sm.add_argument("-n", type=int, default=20, help="list limit, 1..1000")
 
     si = sub.add_parser("sim", help="inject fake traffic (fake adapters only)")
     si.add_argument("kind")
@@ -168,6 +243,26 @@ def main() -> None:
         _out(_req(args, "GET", "/api/status"))
     elif args.cmd == "watch":
         _watch(args)
+    elif args.cmd == "wait":
+        try:
+            asyncio.run(_wait(args))
+        except KeyboardInterrupt:
+            _fail("Interrupted", code=130)
+    elif args.cmd == "settings":
+        if args.action == "set":
+            if not args.values:
+                p.error("settings set needs at least one key=value")
+            body: dict = {}
+            for key, value in _pairs(args.values).items():
+                if key.startswith(
+                    "livekit."
+                ):  # livekit.url=wss://... -> {"livekit": {"url": ...}}
+                    body.setdefault("livekit", {})[key.removeprefix("livekit.")] = value
+                else:
+                    body[key] = value
+            _out(_req(args, "POST", "/api/settings", body))
+        else:
+            _out(_req(args, "GET", "/api/settings"))
     elif args.cmd == "call":
         _out(_req(args, "POST", "/api/calls", {"number": args.number}))
     elif args.cmd == "answer":
@@ -192,7 +287,7 @@ def main() -> None:
         status = _req(args, "GET", "/api/status")
         rooms = [c["room"] for c in status["calls"] if c.get("room")]
         if not rooms:
-            sys.exit("no active call with a room; run `bridge` first")
+            _fail("No active call with a room; run bridge first")
         _out(
             _req(
                 args,
@@ -206,9 +301,21 @@ def main() -> None:
     elif args.cmd == "volume":
         _out(_req(args, "POST", "/api/volume", {"level": args.level}))
     elif args.cmd == "sms":
-        _out(
-            _req(args, "POST", "/api/sms", {"to": args.to, "text": " ".join(args.text)})
-        )
+        if args.to == "list":
+            if args.text:
+                p.error("sms list accepts only -n <limit>")
+            _out(_req(args, "GET", f"/api/sms?limit={args.n}"))
+        else:
+            if not args.text:
+                p.error("sms needs a destination and message text")
+            _out(
+                _req(
+                    args,
+                    "POST",
+                    "/api/sms",
+                    {"to": args.to, "text": " ".join(args.text)},
+                )
+            )
     elif args.cmd == "contacts":
         q = args.query.lower()
         items = _req(args, "GET", "/api/contacts")
@@ -228,7 +335,7 @@ def main() -> None:
     elif args.cmd == "logs":
         print("\n".join(_req(args, "GET", "/api/debug")["logs"][-args.n :]))
     elif args.cmd == "sim":
-        params = dict(kv.split("=", 1) for kv in args.params)
+        params = _pairs(args.params)
         _out(_req(args, "POST", f"/api/simulate/{args.kind}", params))
 
 

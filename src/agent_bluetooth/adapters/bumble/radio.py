@@ -24,6 +24,71 @@ from ...core.context import Context
 from . import usb_sink
 
 log = logging.getLogger(__name__)
+
+
+class RadioProblem:
+    """Why the radio isn't up, in words a person or an agent can act on.
+    Exposed in phone status as `radio_error` ({error, hint}). Deliberately no
+    auto-fixing: dongles and systems differ, so we explain and point the way."""
+
+    error: str | None = None
+    hint: str | None = None
+
+    @classmethod
+    def set(cls, error: str, spec: str) -> None:
+        cls.error, cls.hint = error, _hint(error, spec)
+
+    @classmethod
+    def clear(cls) -> None:
+        cls.error = cls.hint = None
+
+    @classmethod
+    def as_dict(cls) -> dict[str, str] | None:
+        return {"error": cls.error, "hint": cls.hint or ""} if cls.error else None
+
+
+def _hint(error: str, spec: str) -> str:
+    e = error.lower()
+    if "firmware" in e:
+        return (
+            "This dongle needs a vendor firmware file before it works. Find the named file "
+            "(Realtek: linux-firmware, rtl_bt/) and put it in the directory set by "
+            "BUMBLE_RTK_FIRMWARE_DIR. See https://google.github.io/bumble/drivers/realtek.html"
+        )
+    if "busy" in e or "access" in e:
+        return (
+            "Another driver or process holds the dongle. Linux: stop bluetoothd or unbind the "
+            "kernel btusb driver for this device; make sure this user can access USB devices."
+        )
+    if (
+        "not found" in e
+        or "not_found" in e
+        or "no such device" in e
+        or "no device" in e
+        or "no_device" in e
+    ):
+        return (
+            f"No USB Bluetooth dongle matched transport '{spec}'. Check it is plugged in, find "
+            "its VID:PID (lsusb on Linux, System Information > USB on macOS) and set "
+            '[bluetooth] transport = "usb:VID:PID+sco=2".'
+        )
+    return f"Opening '{spec}' failed. Check the dongle and [bluetooth] transport, then run agent-bluetooth logs."
+
+
+class _FirmwareWarnings(logging.Handler):
+    """Bumble's vendor drivers only log a warning when firmware is missing and
+    keep going with a half-working radio. Turn that into a visible problem."""
+
+    spec = ""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if "Firmware file" in msg and "not found" in msg:
+            RadioProblem.set(msg, self.spec)
+
+
+_firmware_watch = _FirmwareWarnings(logging.WARNING)
+logging.getLogger("bumble.drivers").addHandler(_firmware_watch)
 CLASS_HANDS_FREE = (
     0x240408  # services: Audio + Rendering; device: Audio/Video, Hands-free
 )
@@ -60,9 +125,17 @@ class BumbleRadio:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                return await cls._open_once(cfg, spec)
+                _firmware_watch.spec = spec
+                radio = await cls._open_once(cfg, spec)
+                if (
+                    RadioProblem.error is None
+                    or "firmware" not in RadioProblem.error.lower()
+                ):
+                    RadioProblem.clear()
+                return radio
             except Exception as e:
                 last_error = e
+                RadioProblem.set(str(e) or type(e).__name__, spec)
                 log.warning("radio open attempt %d/%d failed: %s", attempt, attempts, e)
                 if attempt < attempts:
                     await asyncio.sleep(2)

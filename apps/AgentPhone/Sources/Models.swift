@@ -10,6 +10,7 @@ struct Indicators: Decodable {
 struct Phone: Decodable {
     var connected: Bool
     var radio: Bool?
+    var radio_error: RadioError?
     var name: String?
     var peer: String?
     var call: Call?
@@ -123,6 +124,7 @@ struct AppSettings: Decodable {
     var play_file: String
     var answer: String
     var livekit: LiveKit
+    var summary: String?  // box's plain-words description of what happens on the next call
 }
 
 /// Server-side directory sync state (GET /api/directory).
@@ -191,4 +193,10 @@ struct AppPrefs: Codable {
         guard let data = try? JSONEncoder().encode(self) else { return }
         try? data.write(to: Self.url, options: [.atomic, .completeFileProtection])
     }
+}
+
+/// Why the Bluetooth radio isn't up, with the next step (from the box).
+struct RadioError: Decodable, Equatable {
+    var error: String
+    var hint: String
 }
