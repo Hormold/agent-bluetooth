@@ -13,9 +13,12 @@ enum DebugSnapshot {
     }
 
     @MainActor private static func write(to path: String) {
-        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
-              let view = window.contentView?.superview ?? window.contentView,
-              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        let visible = NSApp.windows.filter { $0.isVisible && $0.contentView != nil && $0.frame.width > 200 }
+        let main = visible.filter { $0.styleMask.contains(.titled) }.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+        // A sheet, when open, is what the screenshot is for.
+        guard let window = visible.first(where: { $0.isSheet }) ?? main ?? visible.first,
+              let view = window.contentView?.superview ?? window.contentView else { return }
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
     }
@@ -31,6 +34,31 @@ enum DemoMode {
         ProcessInfo.processInfo.environment["AGENTPHONE_HOST"]
         #else
         nil
+        #endif
+    }
+
+    /// AGENTPHONE_OPEN=settings opens the settings sheet at launch (screenshots).
+    static var openSettings: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["AGENTPHONE_OPEN"] == "settings"
+        #else
+        false
+        #endif
+    }
+
+    static var forceGate: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["AGENTPHONE_OPEN"] == "gate"
+        #else
+        false
+        #endif
+    }
+
+    static var openSetup: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["AGENTPHONE_OPEN"] == "setup"
+        #else
+        false
         #endif
     }
 

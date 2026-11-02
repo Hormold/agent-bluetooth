@@ -28,131 +28,149 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            ZStack {
                 Text("Settings").font(.headline)
-                Spacer()
-                Button("Done") { applyBox(); save(); dismiss() }.keyboardShortcut(.defaultAction)
+                HStack {
+                    Spacer()
+                    Button { applyBox(); save(); dismiss() } label: {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .frame(width: 28, height: 28)
+                            .background(.quaternary.opacity(0.5), in: Circle())
+                    }
+                    .buttonStyle(PressButtonStyle())
+                    .keyboardShortcut(.defaultAction)
+                    .help("Done")
+                    .accessibilityLabel("Done")
+                }
             }
-            .padding(.horizontal, 20).padding(.vertical, 14)
-            Divider().opacity(0.5)
+            .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    calls.disabled(baseline == nil)
+                VStack(alignment: .leading, spacing: 18) {
+                    calls.disabled(baseline == nil).opacity(baseline == nil ? 0.5 : 1)
+                    strangers.disabled(baseline == nil).opacity(baseline == nil ? 0.5 : 1)
                     phones
                     advancedSection
                 }
-                .padding(20)
-                .overlay(alignment: .top) {
-                    if baseline == nil && center.daemonOnline { ProgressView().controlSize(.small).padding(.top, 4) }
-                }
+                .padding(.horizontal, 16).padding(.bottom, 20).padding(.top, 4)
             }
         }
-        .frame(width: 400, height: 600)
+        .frame(width: 400, height: 620)
         .onAppear(perform: load)
+        .animation(.easeOut(duration: 0.2), value: mode)
+        .animation(.easeOut(duration: 0.2), value: unknown)
     }
 
     // MARK: sections
 
     private var calls: some View {
-        section("When someone calls") {
-            ForEach(modes, id: \.id) { m in
-                ModeRow(symbol: m.symbol, title: m.title, detail: m.detail, selected: mode == m.id) {
+        SettingsSection("When someone calls") {
+            ForEach(Array(modes.enumerated()), id: \.element.id) { i, m in
+                RadioRow(symbol: m.symbol, title: m.title, detail: m.detail, selected: mode == m.id) {
                     mode = m.id
                     save()
                 }
-            }
-            if mode == "agent" {
-                field("Agent name", text: $agentName, placeholder: "phone-receptionist", onSubmit: save)
-            }
-            if mode == "play" {
-                HStack(spacing: 10) {
-                    Image(systemName: "waveform").foregroundStyle(.secondary)
-                    Text(playFile.isEmpty ? "No recording chosen" : (playFile as NSString).lastPathComponent)
-                        .lineLimit(1).truncationMode(.middle)
-                        .foregroundStyle(playFile.isEmpty ? .secondary : .primary)
-                    Spacer()
-                    Button(playFile.isEmpty ? "Choose\u{2026}" : "Change\u{2026}", action: chooseFile)
+                if m.id == "agent" && mode == "agent" {
+                    InlineField(label: "Agent name", text: $agentName, placeholder: "phone-receptionist", onSubmit: save)
                 }
-                .font(.callout)
-                .padding(10)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+                if m.id == "play" && mode == "play" {
+                    ValueRow(symbol: "waveform", title: "Greeting",
+                             value: playFile.isEmpty ? "Choose\u{2026}" : (playFile as NSString).lastPathComponent,
+                             action: chooseFile)
+                }
+                if i < modes.count - 1 { CardDivider() }
             }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Numbers not in your contacts").font(.callout)
-                Picker("", selection: $unknown) {
-                    Text("Same as above").tag("same")
-                    Text("Greeting").tag("play")
-                    Text("Keep busy").tag("stall")
-                    Text("Decline").tag("reject")
+        }
+    }
+
+    private struct Choice { let id, title, detail, symbol: String }
+    private let strangerChoices = [
+        Choice(id: "same", title: "Same as everyone", detail: "Use the option above.", symbol: "person.2"),
+        Choice(id: "play", title: "Play the greeting", detail: "Answer, play it, hang up.", symbol: "play.circle"),
+        Choice(id: "stall", title: "Keep them busy", detail: "Recorded phrases between their replies, a few minutes.", symbol: "hourglass"),
+        Choice(id: "reject", title: "Decline", detail: "Hang up without answering.", symbol: "phone.down"),
+    ]
+
+    private var strangers: some View {
+        SettingsSection("Numbers not in your contacts") {
+            ForEach(Array(strangerChoices.enumerated()), id: \.element.id) { i, c in
+                RadioRow(symbol: c.symbol, title: c.title, detail: c.detail, selected: unknown == c.id) {
+                    unknown = c.id
+                    save()
                 }
-                .pickerStyle(.segmented).labelsHidden()
-                .onChange(of: unknown) { _, _ in save() }
-                if unknown == "play" && playFile.isEmpty {
-                    Text("Choose a greeting under \u{201C}Play a greeting\u{201D} first.")
-                        .font(.caption).foregroundStyle(.orange)
+                if c.id == "stall" && unknown == "stall" {
+                    ValueRow(symbol: "folder", title: "Phrases",
+                             value: stallDir.isEmpty ? "Choose folder\u{2026}" : (stallDir as NSString).lastPathComponent,
+                             action: chooseStallFolder)
                 }
-                if unknown == "stall" {
-                    HStack(spacing: 10) {
-                        Image(systemName: "folder").foregroundStyle(.secondary)
-                        Text(stallDir.isEmpty ? "No phrases folder" : (stallDir as NSString).lastPathComponent)
-                            .lineLimit(1).truncationMode(.middle)
-                            .foregroundStyle(stallDir.isEmpty ? .secondary : .primary)
-                        Spacer()
-                        Button(stallDir.isEmpty ? "Choose\u{2026}" : "Change\u{2026}", action: chooseStallFolder)
-                    }
-                    .font(.callout)
-                    .padding(10)
-                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
-                    Text("Answers and plays your recorded phrases (\u{201C}Hello? Sorry, can you repeat?\u{201D}) between their replies, for a few minutes.")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
+                if i < strangerChoices.count - 1 { CardDivider() }
             }
-            .padding(.top, 4)
-            if let summary = center.settings?.summary, !summary.isEmpty {
-                Text(summary).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        } footer: {
+            if unknown == "play" && playFile.isEmpty {
+                Text("Choose a greeting above first.").foregroundStyle(.orange)
+            } else if unknown == "stall" {
+                Text("Record a few short phrases in your own voice: \u{201C}Hello?\u{201D}, \u{201C}Sorry, can you repeat that?\u{201D}")
             }
         }
     }
 
     private var phones: some View {
-        section("Phone") {
+        SettingsSection("Phone") {
             ForEach(center.phones) { p in
-                HStack(spacing: 8) {
-                    Circle().fill(p.connected ? .green : .secondary.opacity(0.5)).frame(width: 7, height: 7)
-                    Text(p.display).font(.callout)
-                    Text(p.connected ? "Connected" : "Not connected").font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Circle().fill(p.connected ? Color.green : Color.secondary.opacity(0.4)).frame(width: 7, height: 7)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(p.display).font(.body.weight(.medium))
+                        Text(p.connected ? "Connected" : "Not connected").font(.caption).foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    Button("Forget", role: .destructive) { center.forget(p.address) }
-                        .buttonStyle(.borderless).font(.caption)
+                    Button("Forget") { center.forget(p.address) }
+                        .buttonStyle(.plain).font(.callout).foregroundStyle(.red)
                 }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                CardDivider()
             }
             Button { center.pairNewPhone() } label: {
-                Label(center.phones.isEmpty ? "Pair a phone" : "Pair another phone", systemImage: "plus")
+                HStack(spacing: 10) {
+                    Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).frame(width: 18)
+                    Text(center.phones.isEmpty ? "Pair a phone" : "Pair another phone")
+                    Spacer()
+                }
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 14).padding(.vertical, 11)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
         }
     }
 
     private var advancedSection: some View {
-        DisclosureGroup(isExpanded: $advanced) {
-            VStack(alignment: .leading, spacing: 12) {
-                field("Box address", text: $draftHost, mono: true, onSubmit: applyBox)
-                field("API key", text: $draftKey, placeholder: "optional", onSubmit: applyBox)
-                Divider().opacity(0.5)
-                field("LiveKit URL", text: $lkURL, mono: true, onSubmit: save)
-                field("LiveKit API key", text: $lkKey, mono: true, onSubmit: save)
-                SecureField("", text: $lkSecret).textFieldStyle(.roundedBorder)
-                    .font(.caption.monospaced()).onSubmit(save)
-                    .overlay(alignment: .topLeading) {
-                        Text("LiveKit API secret").font(.caption2).foregroundStyle(.tertiary).offset(y: -15)
-                    }
-                    .padding(.top, 12)
+        SettingsSection("Advanced") {
+            Button { advanced.toggle() } label: {
+                HStack {
+                    Text("Box and LiveKit")
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(advanced ? 90 : 0))
+                }
+                .padding(.horizontal, 14).padding(.vertical, 11)
+                .contentShape(Rectangle())
             }
-            .padding(.top, 10)
-        } label: {
-            Text("ADVANCED").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            .buttonStyle(.plain)
+            if advanced {
+                CardDivider()
+                InlineField(label: "Box address", text: $draftHost, mono: true, onSubmit: applyBox)
+                CardDivider()
+                InlineField(label: "API key", text: $draftKey, placeholder: "optional", onSubmit: applyBox)
+                CardDivider()
+                InlineField(label: "LiveKit URL", text: $lkURL, mono: true, onSubmit: save)
+                CardDivider()
+                InlineField(label: "LiveKit API key", text: $lkKey, mono: true, onSubmit: save)
+                CardDivider()
+                InlineField(label: "LiveKit API secret", text: $lkSecret, mono: true, secure: true, onSubmit: save)
+            }
         }
+        .animation(.easeOut(duration: 0.2), value: advanced)
     }
 
     // MARK: data
@@ -231,51 +249,115 @@ struct SettingsView: View {
             Task { if let fresh = await center.fetchSettings() { baseline = fresh } }  // rules + summary from the box
         }
     }
+}
 
-    // MARK: building blocks
+// MARK: - Grouped card building blocks (T3-style)
 
-    @ViewBuilder private func section(_ title: String, @ViewBuilder _ content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            content()
-        }
+struct SettingsSection<Content: View, Footer: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+    @ViewBuilder var footer: Footer
+
+    init(_ title: String, @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
+        self.title = title
+        self.content = content()
+        self.footer = footer()
     }
 
-    @ViewBuilder private func field(_ label: String, text: Binding<String>, placeholder: String = "",
-                                    mono: Bool = false, onSubmit: @escaping () -> Void = {}) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label).font(.caption2).foregroundStyle(.tertiary)
-            TextField(placeholder, text: text)
-                .textFieldStyle(.roundedBorder)
-                .font(mono ? .caption.monospaced() : .body)
-                .onSubmit(onSubmit)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                .padding(.leading, 14)
+            VStack(spacing: 0) { content }
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
+            footer
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
         }
     }
 }
 
-struct ModeRow: View {
+extension SettingsSection where Footer == EmptyView {
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.init(title, content: content, footer: { EmptyView() })
+    }
+}
+
+struct CardDivider: View {
+    var body: some View {
+        Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1).padding(.leading, 46)
+    }
+}
+
+/// One option in a card; the whole row selects it.
+struct RadioRow: View {
     let symbol: String, title: String, detail: String, selected: Bool
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: symbol).font(.system(size: 15)).frame(width: 22)
+                Image(systemName: symbol).font(.system(size: 14)).frame(width: 20)
                     .foregroundStyle(selected ? Color.accentColor : .secondary)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).foregroundStyle(.primary)
-                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
-                Spacer()
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary.opacity(0.4))
-                    .contentTransition(.symbolEffect(.replace))
+                Spacer(minLength: 8)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(Color.accentColor)
+                    .opacity(selected ? 1 : 0)
             }
-            .padding(.vertical, 9).padding(.horizontal, 12)
-            .background(selected ? Color.accentColor.opacity(0.10) : Color.secondary.opacity(0.05),
-                        in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 14).padding(.vertical, 10)
             .contentShape(Rectangle())
         }
-        .buttonStyle(PressButtonStyle())
+        .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// A setting that opens a picker: label on the left, current value + chevron on the right.
+struct ValueRow: View {
+    let symbol: String, title: String, value: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Color.clear.frame(width: 20)
+                Image(systemName: symbol).font(.caption).foregroundStyle(.secondary)
+                Text(title).font(.callout)
+                Spacer(minLength: 8)
+                Text(value).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14).padding(.bottom, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Label above a borderless text field, inside a card.
+struct InlineField: View {
+    let label: String
+    @Binding var text: String
+    var placeholder = ""
+    var mono = false
+    var secure = false
+    let onSubmit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Group {
+                if secure { SecureField(placeholder, text: $text) } else { TextField(placeholder, text: $text) }
+            }
+            .textFieldStyle(.plain)
+            .font(mono ? .callout.monospaced() : .callout)
+            .onSubmit(onSubmit)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

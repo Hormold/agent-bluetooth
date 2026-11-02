@@ -2,18 +2,19 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var center: CallCenter
-    @State private var showSettings = false
+    @State private var showReadiness = false
+    @EnvironmentObject var readiness: Readiness
 
     var body: some View {
         VStack(spacing: 0) {
-            StatusBar(showSettings: $showSettings)
+            StatusBar(showSettings: $center.settingsOpen, showReadiness: $showReadiness)
             ZStack {
                 if let call = center.call, call.state != "ended" {
                     CallView(call: call)
                         .transition(.asymmetric(insertion: .scale(scale: 0.96).combined(with: .opacity),
                                                 removal: .opacity))
-                } else if let step = center.setupStep {
-                    SetupView(step: step, showSettings: $showSettings)
+                } else if center.setupStep != nil || DemoMode.forceGate {
+                    ReadinessView()
                         .transition(.opacity)
                 } else {
                     HomeView()
@@ -27,7 +28,36 @@ struct ContentView: View {
         }
         .background(.background)
         .ignoresSafeArea(.container, edges: .top)  // header shares the titlebar row
-        .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(isPresented: $center.settingsOpen) { SettingsView() }
+        .sheet(isPresented: $showReadiness) {
+            VStack(spacing: 0) {
+                ZStack {
+                    Text("Setup").font(.headline)
+                    HStack {
+                        Spacer()
+                        Button { showReadiness = false } label: {
+                            Image(systemName: "checkmark").font(.system(size: 12, weight: .bold))
+                                .frame(width: 28, height: 28).background(.quaternary.opacity(0.5), in: Circle())
+                        }
+                        .buttonStyle(PressButtonStyle()).keyboardShortcut(.defaultAction).accessibilityLabel("Done")
+                    }
+                }
+                .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
+                ReadinessView(compact: true)
+            }
+            .frame(width: 420, height: 640)
+        }
+        .task {  // keep the header's setup chip honest
+            while !Task.isCancelled {
+                await readiness.refresh(center)
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+        .task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if DemoMode.openSettings { center.settingsOpen = true }
+            if DemoMode.openSetup { showReadiness = true }
+        }
         .overlay(alignment: .top) {
             if let err = center.error {
                 Text(err).font(.caption).foregroundStyle(.white)
@@ -47,6 +77,8 @@ struct ContentView: View {
 struct StatusBar: View {
     @EnvironmentObject var center: CallCenter
     @Binding var showSettings: Bool
+    @Binding var showReadiness: Bool
+    @EnvironmentObject var readiness: Readiness
 
     var body: some View {
         HStack(spacing: 10) {
@@ -55,13 +87,19 @@ struct StatusBar: View {
                 if let s = center.phone.indicators?.signal { SignalBars(level: s) }
                 if let b = center.phone.indicators?.battchg { BatteryDot(level: b) }
             }
-            StatusChip(text: statusText, tint: tint)
+            Button { showReadiness = true } label: {
+                StatusChip(text: needsSetup ? "Setup needed" : statusText, tint: needsSetup ? .orange : tint)
+            }
+            .buttonStyle(PressButtonStyle())
+            .help("Setup and status")
             CircleButton(symbol: "ellipsis", label: "Settings") { showSettings = true }
         }
         .padding(.leading, 82)  // the row is shared with the window's traffic lights
         .padding(.trailing, 12)
         .frame(height: 32)
     }
+
+    private var needsSetup: Bool { readiness.problems > 0 && center.daemonOnline }
 
     private var tint: Color {
         center.phone.connected ? .green : (center.daemonOnline ? .orange : .secondary)

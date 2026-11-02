@@ -25,6 +25,7 @@ final class CallCenter: ObservableObject {
     @Published var settings: AppSettings?
     @Published var daemonOnline = false
     @Published var error: String?
+    @Published var settingsOpen = false  // the Settings sheet; also opened with ⌘,
 
     @Published var host: String {
         didSet { savePrefs(); reconnect() }
@@ -34,6 +35,7 @@ final class CallCenter: ObservableObject {
     }
 
     let live = LiveKitRoom()
+    let readiness = Readiness()
     private let alert = IncomingCallAlert()
     private var api: APIClient
     private var stream: EventStream?
@@ -167,6 +169,17 @@ final class CallCenter: ObservableObject {
         guard let s = try? await api.settings() else { return nil }
         settings = s
         return s
+    }
+
+    /// Point the box at the LiveKit dev server on this Mac.
+    func useLocalLiveKit() {
+        let local = "ws://127.0.0.1:7880"
+        saveSettings(["livekit": ["url": local, "client_url": local, "api_key": "devkey", "api_secret": "secret"]])
+    }
+
+    /// Point the box at a LiveKit Cloud project (needed for hosted voice agents).
+    func useCloudLiveKit(url: String, key: String, secret: String) {
+        saveSettings(["livekit": ["url": url, "client_url": url, "api_key": key, "api_secret": secret]])
     }
 
     func pairNewPhone() { run { try await self.api.pair() } }

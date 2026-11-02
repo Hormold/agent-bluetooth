@@ -26,11 +26,12 @@ targets:
     entitlements:
       path: Sources/AgentPhone.entitlements
       properties:
-        com.apple.security.app-sandbox: true
+        com.apple.security.app-sandbox: false  # installs/starts local services (brew, uv, LaunchAgents)
         com.apple.security.network.client: true
         com.apple.security.network.server: true  # WebRTC binds UDP sockets for ICE
         com.apple.security.device.audio-input: true
         com.apple.security.files.user-selected.read-only: true  # pick a greeting WAV
+        com.apple.security.cs.disable-library-validation: true  # load LiveKit's prebuilt (LiveKit-signed) WebRTC framework
     settings:
       base:
         MARKETING_VERSION: "0.1.0"

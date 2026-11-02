@@ -69,12 +69,15 @@ How the phone appears in the room: [docs/LIVEKIT.md](docs/LIVEKIT.md).
 ## Mac app
 
 ```bash
-cd apps/AgentPhone && xcodegen && open AgentPhone.xcodeproj
+apps/AgentPhone/install.sh       # builds it and installs "Agent Phone" into /Applications
 ```
 
-It finds the daemon on this Mac, walks you through pairing, then it's a phone:
-recents, contacts, keypad, incoming call alerts, and a choice of what happens
-when someone calls (ring here, an AI agent, a greeting, record).
+On first launch it checks everything it needs (the service, the dongle, the
+phone, LiveKit, microphone, notifications) and sets up what it can with one
+button: installs and starts the local service and LiveKit through Homebrew and
+uv, or connects LiveKit Cloud if you want hosted voice agents. Then it's a
+phone: recents, contacts, keypad, incoming call alerts, and a choice of what
+happens when someone calls.
 
 ## Docs
 
