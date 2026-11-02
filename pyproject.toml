@@ -1,8 +1,10 @@
 [project]
 name = "agent-bluetooth"
 version = "0.1.0"
-description = "Turn any phone into an API and a LiveKit room over Bluetooth"
+description = "Let your AI agent make and take calls on your real phone, over a USB Bluetooth dongle and LiveKit"
 readme = "README.md"
+license = "MIT"
+keywords = ["bluetooth", "hfp", "telephony", "livekit", "voice-agent", "ai-agent", "sms", "bumble"]
 authors = [
     { name = "Nikita", email = "hormold@gmail.com" }
 ]
@@ -13,6 +15,10 @@ dependencies = [
     "livekit>=1.1.21",
     "livekit-api>=1.2.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Hormold/agent-bluetooth"
+Issues = "https://github.com/Hormold/agent-bluetooth/issues"
 
 [project.scripts]
 agent-bluetooth = "agent_bluetooth.cli:main"

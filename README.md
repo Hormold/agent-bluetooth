@@ -139,3 +139,7 @@ happens when someone calls.
 [Setup](docs/SETUP.md) · [LiveKit](docs/LIVEKIT.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 Inspired by an idea from [Grigory Bakunov (@bobuk)](https://github.com/bobuk).
+
+## License
+
+[MIT](LICENSE).
