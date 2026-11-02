@@ -14,8 +14,9 @@ LiveKit rooms. No Twilio, no SIP trunk, no new number: your real one.
   agents work unchanged.
 - **Texts** (Android): send, list, wait for a reply.
 - **Contacts and call history**, synced from the phone.
-- **Agent Phone**, a small macOS softphone. **A Claude Code skill**, so your
-  agent can text and call.
+- **Agent Phone**, a small macOS softphone
+  ([download](https://github.com/Hormold/agent-bluetooth/releases/latest/download/Agent-Phone-0.1.0.zip)).
+  **A Claude Code skill**, so your agent can text and call.
 
 ## You need
 
@@ -73,6 +74,11 @@ How the phone appears in the room: [docs/LIVEKIT.md](docs/LIVEKIT.md).
   <img src="docs/assets/app-setup.png" alt="Setup checklist" width="32%">
   <img src="docs/assets/app-settings.png" alt="Call settings" width="32%">
 </p>
+
+**[Download Agent Phone for macOS](https://github.com/Hormold/agent-bluetooth/releases/latest)**
+(signed and notarized, macOS 14+). Unzip, drag it to Applications, open.
+
+Or build it yourself:
 
 ```bash
 apps/AgentPhone/install.sh       # builds it and installs "Agent Phone" into /Applications

@@ -6,9 +6,10 @@
 #
 # One-time setup:
 #   - a "Developer ID Application" certificate in your login keychain
-#   - notary credentials saved in the keychain:
+#   - notary credentials saved in the keychain, from an App Store Connect API key:
 #       xcrun notarytool store-credentials agentphone \
-#         --apple-id you@example.com --team-id ABCDE12345 --password <app-specific password>
+#         --key AuthKey_XXXX.p8 --key-id XXXX --issuer <issuer uuid>
+#     (or --apple-id you@example.com --team-id ABCDE12345 --password <app-specific password>)
 #   - gh authenticated for the repo
 set -euo pipefail
 
