@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-FIELDS = ("incoming", "outgoing", "agent_name", "play_file", "answer")
+FIELDS = ("incoming", "outgoing", "agent_name", "play_file", "stall_dir", "answer")
 LIVEKIT_FIELDS = ("url", "client_url", "api_key", "api_secret")
 
 
@@ -46,6 +46,7 @@ def current(app: App) -> dict[str, Any]:
         "outgoing": r.outgoing_mode,
         "agent_name": r.agent_name,
         "play_file": r.play_path,
+        "stall_dir": r.stall_dir,
         "answer": r.answer_mode,
     }
     b = app.bridge
@@ -92,6 +93,12 @@ def _describe(r, mode: str, direction: str, rule: dict[str, Any] | None = None) 
     play_path = rule.get("play_file") or r.play_path
     agent_name = rule.get("agent_name") or r.agent_name
     incoming = direction == "in"
+    if mode == "stall":
+        folder = rule.get("stall_dir") or r.stall_dir or "(no stall_dir set)"
+        return (
+            f"answered and kept busy with phrases from {folder} "
+            f"for up to {r.stall_minutes:g} min, then hung up"
+        )
     if mode == "ignore":
         return "left for manual control"
     if mode == "reject" and incoming:
@@ -148,7 +155,7 @@ def validate(app: App, data: dict[str, Any]) -> None:
     for field in FIELDS:
         if field in data and not isinstance(data[field], str):
             raise ValueError(f"{field} must be a string")
-    modes = {"app", "agent", "play", "record", "ignore"}
+    modes = {"app", "agent", "play", "record", "ignore", "stall"}
     for field in ("incoming", "outgoing"):
         allowed = modes | ({"reject"} if field == "incoming" else set())
         if field in data and data[field] not in allowed:
@@ -176,7 +183,11 @@ def validate(app: App, data: dict[str, Any]) -> None:
                     f"livekit.{k} must start with ws://, wss://, http:// or https://"
                 )
     if "rules" in data:
-        validate_rules(data["rules"], data.get("play_file") or app.router.play_path)
+        validate_rules(
+            data["rules"],
+            data.get("play_file") or app.router.play_path,
+            data.get("stall_dir") or app.router.stall_dir,
+        )
     merged = {**current(app), **data}
     if (
         merged["incoming"] == "play"
@@ -184,6 +195,8 @@ def validate(app: App, data: dict[str, Any]) -> None:
         or data.get("play_file")
     ):
         validate_wav(merged["play_file"])
+    if merged["incoming"] == "stall" or merged["outgoing"] == "stall":
+        validate_stall_dir(merged.get("stall_dir", ""))
 
 
 RULE_KEYS = {
@@ -194,14 +207,29 @@ RULE_KEYS = {
     "action",
     "agent_name",
     "play_file",
+    "stall_dir",
 }
-RULE_MODES = {"app", "agent", "play", "record", "reject", "ignore"}
+RULE_MODES = {"app", "agent", "play", "record", "reject", "ignore", "stall"}
 
 
-def validate_rules(rules: Any, default_play: str = "") -> None:
+def validate_stall_dir(folder: str) -> None:
+    from ..adapters.audio.stall import phrases_in
+
+    if not folder:
+        raise ValueError("stall mode needs stall_dir: a folder of 16-bit WAV phrases")
+    if not Path(folder).expanduser().is_dir():
+        raise ValueError(f"stall_dir {folder!r} is not a folder")
+    clips = phrases_in(folder)
+    if not clips:
+        raise ValueError(f"stall_dir {folder!r} has no .wav files")
+    for clip in clips:
+        validate_wav(str(clip))
+
+
+def validate_rules(rules: Any, default_play: str = "", default_stall: str = "") -> None:
     """Rules route a call by who calls. First match wins. Each rule:
     {direction: in|out|any, when_number: glob, when_contact: bool,
-     mode: app|agent|play|record|reject|ignore, agent_name?, play_file?}"""
+     mode: app|agent|play|record|reject|ignore|stall, agent_name?, play_file?, stall_dir?}"""
     if not isinstance(rules, list):
         raise ValueError("rules must be a list")
     for i, rule in enumerate(rules):
@@ -220,11 +248,13 @@ def validate_rules(rules: Any, default_play: str = "") -> None:
             raise ValueError(f"{where}: direction must be in, out or any")
         if "when_contact" in rule and not isinstance(rule["when_contact"], bool):
             raise ValueError(f"{where}: when_contact must be true or false")
-        for k in ("when_number", "agent_name", "play_file"):
+        for k in ("when_number", "agent_name", "play_file", "stall_dir"):
             if k in rule and not isinstance(rule[k], str):
                 raise ValueError(f"{where}: {k} must be a string")
         if mode == "play":
             validate_wav(rule.get("play_file") or default_play)
+        if mode == "stall":
+            validate_stall_dir(rule.get("stall_dir") or default_stall)
 
 
 def apply(app: App, data: dict[str, Any]) -> None:
@@ -239,6 +269,8 @@ def apply(app: App, data: dict[str, Any]) -> None:
         r.agent_name = str(data["agent_name"])
     if "play_file" in data:
         r.play_path = str(data["play_file"])
+    if "stall_dir" in data:
+        r.stall_dir = str(data["stall_dir"])
     if "answer" in data:
         r.answer_mode = str(data["answer"])
     lk = dict(data.get("livekit") or {})

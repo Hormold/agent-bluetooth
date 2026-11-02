@@ -55,6 +55,10 @@ Route by caller (first match wins; settings.rules, persisted):
   agent-bluetooth rules add when_contact=true mode=agent agent_name=receptionist
   agent-bluetooth rules add when_number='+1800*' mode=reject
   agent-bluetooth rules list | rules remove 0 | rules clear
+  agent-bluetooth rules preset contacts-only|screen-unknown|block-tollfree
+  agent-bluetooth block <number...> [--stall] [--file list.txt] | unblock | blocked
+mode=stall answers and plays random phrases from stall_dir between the caller's
+replies for stall_minutes (default 5), then hangs up (wastes spammers' time).
 Conditions: when_contact (from synced contacts), when_number (glob), direction
 in|out|any. Per-rule agent_name / play_file override the defaults. status shows
 each call's name and contact flag.

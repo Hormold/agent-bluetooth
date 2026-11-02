@@ -65,6 +65,23 @@ agent-bluetooth rules add when_number='+1800*' mode=reject
 agent-bluetooth rules list          # or: rules remove 0 | rules clear
 ```
 
+Quick setups:
+
+```bash
+agent-bluetooth rules preset contacts-only     # decline everyone not in contacts
+agent-bluetooth rules preset screen-unknown    # keep unknown numbers busy (below)
+agent-bluetooth rules preset block-tollfree    # decline +1 800/888/877/... numbers
+agent-bluetooth block +14155550199             # blocklist; --file list.txt to import
+agent-bluetooth block +14155550177 --stall     # ...or keep that one busy instead
+agent-bluetooth blocked | unblock <number>
+```
+
+**Keep them busy** (`mode=stall`): answers, plays a random phrase from a folder
+of WAVs ("Hello? Sorry, can you repeat that?"), waits for the caller to speak and
+go quiet, plays the next, for up to `stall_minutes` (default 5), then hangs up.
+Record the phrases in your own voice: `agent-bluetooth settings set
+stall_dir=/abs/path/phrases`.
+
 Conditions: `when_contact` (true/false, from the synced phonebook), `when_number`
 (glob), `direction` (in/out/any). A rule can carry its own `agent_name` or
 `play_file`.

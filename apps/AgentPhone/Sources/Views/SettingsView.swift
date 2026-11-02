@@ -15,7 +15,8 @@ struct SettingsView: View {
     @State private var draftKey = ""
     @State private var advanced = false
     @State private var baseline: AppSettings?  // what the box had when the form loaded
-    @State private var unknown = "same"          // numbers not in contacts: same | play | reject
+    @State private var unknown = "same"          // numbers not in contacts: same | play | stall | reject
+    @State private var stallDir = ""
 
     private struct Mode { let id, title, detail, symbol: String }
     private let modes = [
@@ -80,7 +81,8 @@ struct SettingsView: View {
                 Text("Numbers not in your contacts").font(.callout)
                 Picker("", selection: $unknown) {
                     Text("Same as above").tag("same")
-                    Text("Play greeting").tag("play")
+                    Text("Greeting").tag("play")
+                    Text("Keep busy").tag("stall")
                     Text("Decline").tag("reject")
                 }
                 .pickerStyle(.segmented).labelsHidden()
@@ -88,6 +90,21 @@ struct SettingsView: View {
                 if unknown == "play" && playFile.isEmpty {
                     Text("Choose a greeting under \u{201C}Play a greeting\u{201D} first.")
                         .font(.caption).foregroundStyle(.orange)
+                }
+                if unknown == "stall" {
+                    HStack(spacing: 10) {
+                        Image(systemName: "folder").foregroundStyle(.secondary)
+                        Text(stallDir.isEmpty ? "No phrases folder" : (stallDir as NSString).lastPathComponent)
+                            .lineLimit(1).truncationMode(.middle)
+                            .foregroundStyle(stallDir.isEmpty ? .secondary : .primary)
+                        Spacer()
+                        Button(stallDir.isEmpty ? "Choose\u{2026}" : "Change\u{2026}", action: chooseStallFolder)
+                    }
+                    .font(.callout)
+                    .padding(10)
+                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+                    Text("Answers and plays your recorded phrases (\u{201C}Hello? Sorry, can you repeat?\u{201D}) between their replies, for a few minutes.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.top, 4)
@@ -148,6 +165,7 @@ struct SettingsView: View {
             guard let s = await center.fetchSettings() else { return }
             mode = s.incoming; agentName = s.agent_name; playFile = s.play_file
             lkURL = s.livekit.url; lkKey = s.livekit.api_key; lkSecret = s.livekit.api_secret
+            stallDir = s.stall_dir ?? ""
             unknown = s.rules?.first(where: \.isUnknownNumbersRule).flatMap { $0.mode ?? $0.action } ?? "same"
             baseline = s
         }
@@ -159,6 +177,17 @@ struct SettingsView: View {
         panel.message = "Choose a 16-bit WAV to play to callers"
         if panel.runModal() == .OK, let url = panel.url {
             playFile = url.path
+            save()
+        }
+    }
+
+    private func chooseStallFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.message = "Choose a folder of 16-bit WAV phrases"
+        if panel.runModal() == .OK, let url = panel.url {
+            stallDir = url.path
             save()
         }
     }
@@ -182,7 +211,9 @@ struct SettingsView: View {
         if agentName != s.agent_name { body["agent_name"] = agentName }
         if playFile != s.play_file { body["play_file"] = playFile }
         let oldUnknown = s.rules?.first(where: \.isUnknownNumbersRule).flatMap { $0.mode ?? $0.action } ?? "same"
-        if unknown != oldUnknown && !(unknown == "play" && playFile.isEmpty) {
+        if stallDir != (s.stall_dir ?? "") { body["stall_dir"] = stallDir }
+        let waiting = (unknown == "play" && playFile.isEmpty) || (unknown == "stall" && stallDir.isEmpty)
+        if unknown != oldUnknown && !waiting {
             var rules = (s.rules ?? []).filter { !$0.isUnknownNumbersRule }
             if unknown != "same" { rules.insert(CallRule(when_contact: false, mode: unknown), at: 0) }
             if let data = try? JSONEncoder().encode(rules), let obj = try? JSONSerialization.jsonObject(with: data) {
@@ -195,6 +226,7 @@ struct SettingsView: View {
         if !body.isEmpty {
             center.saveSettings(body)
             baseline?.incoming = mode; baseline?.agent_name = agentName; baseline?.play_file = playFile
+            baseline?.stall_dir = stallDir
             baseline?.livekit.url = lkURL; baseline?.livekit.api_key = lkKey; baseline?.livekit.api_secret = lkSecret
             Task { if let fresh = await center.fetchSettings() { baseline = fresh } }  // rules + summary from the box
         }

@@ -53,6 +53,24 @@ class _Parser(argparse.ArgumentParser):
         _fail(message, code=2)
 
 
+def _digits(number: str) -> str:
+    return "".join(c for c in number if c.isdigit())[-10:]
+
+
+def _is_block(rule: dict) -> bool:
+    """A blocklist entry: one exact number, declined or kept busy."""
+    pattern = rule.get("when_number", "")
+    return (
+        bool(pattern)
+        and not any(c in pattern for c in "*?[")
+        and rule.get("mode") in ("reject", "stall")
+    )
+
+
+def _is_unknown_rule(rule: dict) -> bool:
+    return rule.get("when_contact") is False and "when_number" not in rule
+
+
 def _pairs(values: list[str]) -> dict[str, str]:
     result = {}
     for item in values:
@@ -175,6 +193,21 @@ def main() -> None:
         help="data key=value; repeat for AND; nested: call.number=+1555...",
     )
 
+    block = sub.add_parser(
+        "block", help="block numbers (declined, or kept busy with --stall)"
+    )
+    block.add_argument("numbers", nargs="*")
+    block.add_argument(
+        "--file", help="import numbers from a text file, one per line (# comments ok)"
+    )
+    block.add_argument(
+        "--stall",
+        action="store_true",
+        help="keep them busy with stall_dir phrases instead of declining",
+    )
+    unblock = sub.add_parser("unblock", help="remove numbers from the blocklist")
+    unblock.add_argument("numbers", nargs="+")
+    sub.add_parser("blocked", help="list blocked numbers")
     rules = sub.add_parser(
         "rules",
         help="route calls by who calls (first match wins)",
@@ -182,7 +215,10 @@ def main() -> None:
         "rules add when_contact=true mode=agent agent_name=receptionist | rules list | rules remove 0",
     )
     rules.add_argument(
-        "action", choices=["list", "add", "remove", "clear"], nargs="?", default="list"
+        "action",
+        choices=["list", "add", "remove", "clear", "preset"],
+        nargs="?",
+        default="list",
     )
     rules.add_argument(
         "values",
@@ -265,6 +301,59 @@ def main() -> None:
             asyncio.run(_wait(args))
         except KeyboardInterrupt:
             _fail("Interrupted", code=130)
+    elif args.cmd in ("block", "unblock", "blocked"):
+        current_rules = _req(args, "GET", "/api/settings").get("rules", [])
+        if args.cmd == "blocked":
+            _out([r for r in current_rules if _is_block(r)])
+        else:
+            numbers = list(args.numbers)
+            if args.cmd == "block" and args.file:
+                with open(args.file) as f:
+                    numbers += [
+                        ln.split("#")[0].strip() for ln in f if ln.split("#")[0].strip()
+                    ]
+            if not numbers:
+                _fail("Give at least one number (or --file)", code=2)
+            keys = {_digits(n) for n in numbers}
+            kept = [
+                r
+                for r in current_rules
+                if not (_is_block(r) and _digits(r["when_number"]) in keys)
+            ]
+            if args.cmd == "block":
+                mode = "stall" if args.stall else "reject"
+                kept = [{"when_number": n, "mode": mode} for n in numbers] + kept
+            saved = _req(args, "POST", "/api/settings", {"rules": kept})
+            _out({"blocked": [r for r in saved.get("rules", []) if _is_block(r)]})
+    elif args.cmd == "rules" and args.action == "preset":
+        current_rules = _req(args, "GET", "/api/settings").get("rules", [])
+        name = args.values[0] if args.values else ""
+        blocks = [r for r in current_rules if _is_block(r)]
+        others = [
+            r for r in current_rules if not _is_block(r) and not _is_unknown_rule(r)
+        ]
+        if name == "contacts-only":
+            new_rules = blocks + [{"when_contact": False, "mode": "reject"}] + others
+        elif name == "screen-unknown":
+            new_rules = blocks + [{"when_contact": False, "mode": "stall"}] + others
+        elif name == "block-tollfree":
+            toll = [
+                {"when_number": f"+1{p}*", "mode": "reject"}
+                for p in ("800", "888", "877", "866", "855", "844", "833")
+            ]
+            new_rules = (
+                blocks
+                + [r for r in current_rules if r not in blocks and r not in toll]
+                + toll
+            )
+        else:
+            _fail(
+                "Presets: contacts-only (decline everyone not in contacts), screen-unknown "
+                "(keep unknown numbers busy with stall_dir phrases), block-tollfree",
+                code=2,
+            )
+        saved = _req(args, "POST", "/api/settings", {"rules": new_rules})
+        _out({"rules": saved.get("rules", []), "summary": saved.get("summary", "")})
     elif args.cmd == "rules":
         current_rules = _req(args, "GET", "/api/settings").get("rules", [])
         if args.action == "list":

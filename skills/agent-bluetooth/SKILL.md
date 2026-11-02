@@ -69,6 +69,14 @@ agent-bluetooth rules add when_contact=true mode=app
 agent-bluetooth rules list
 ```
 
+Block or screen callers:
+
+```bash
+agent-bluetooth block +15551234567             # decline; --stall keeps them busy instead
+agent-bluetooth rules preset contacts-only     # decline everyone not in contacts
+agent-bluetooth rules preset screen-unknown    # unknown numbers get stall phrases (needs stall_dir)
+```
+
 `status` shows each call's `name` and `contact` (true when the number is in the
 phone's contacts).
 

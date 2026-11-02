@@ -122,6 +122,7 @@ struct AppSettings: Decodable {
     var outgoing: String
     var agent_name: String
     var play_file: String
+    var stall_dir: String?
     var answer: String
     var livekit: LiveKit
     var summary: String?  // box's plain-words description of what happens on the next call

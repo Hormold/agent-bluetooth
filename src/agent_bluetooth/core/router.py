@@ -24,6 +24,7 @@ import logging
 from typing import Any
 
 from ..adapters.audio.file_player import FilePlayer
+from ..adapters.audio.stall import StallPlayer
 from ..adapters.bridge.recorder import RecorderBridge
 from .context import Context
 from .events import E, Event
@@ -52,6 +53,10 @@ class CallRouter:
         self.outgoing_mode: str = cfg.get("outgoing", "app")
         self.agent_name: str = cfg.get("agent_name", "")
         self.play_path: str = cfg.get("play_file", "")
+        self.stall_dir: str = cfg.get(
+            "stall_dir", ""
+        )  # folder of phrases for mode=stall
+        self.stall_minutes: float = float(cfg.get("stall_minutes", 5))
         self.record_dir: str = cfg.get("record_dir", "./recordings")
         self.rules: list[dict[str, Any]] = cfg.get("rules", [])
         self.hangup_on_empty: bool = bool(cfg.get("hangup_on_empty", True))
@@ -128,6 +133,7 @@ class CallRouter:
         )
         agent_name = (rule or {}).get("agent_name") or self.agent_name
         play_path = (rule or {}).get("play_file") or self.play_path
+        stall_dir = (rule or {}).get("stall_dir") or self.stall_dir
         log.info(
             "call %s (%s) from %s -> mode=%s",
             call.id,
@@ -152,6 +158,11 @@ class CallRouter:
                 await self.route_to_room(call)
         elif mode == "record":
             await self.record(call)
+        elif mode == "stall":
+            handler = self.handlers[call.id] = StallPlayer(
+                self.bus, stall_dir, self.stall_minutes
+            )
+            await self._answer_or_attach(call, handler)
 
     def _rule_for(self, call: Call) -> dict[str, Any] | None:
         """First matching rule. Conditions (all optional): direction in|out|any,
@@ -161,7 +172,7 @@ class CallRouter:
             if direction != "any" and call.direction != direction:
                 continue
             pattern = rule.get("when_number")
-            if pattern and not fnmatch.fnmatch(call.number or "", pattern):
+            if pattern and not _number_matches(call.number or "", pattern):
                 continue
             if "when_contact" in rule and bool(rule["when_contact"]) != call.contact:
                 continue
@@ -264,3 +275,13 @@ class CallRouter:
             await handler.close(call)
         if self.rooms.pop(call.id, None) is not None:
             self.bus.publish(E.ROOM_CLOSED, call_id=call.id)
+
+
+def _number_matches(number: str, pattern: str) -> bool:
+    """Glob patterns (+1800*) match the raw number; a plain number matches on
+    digits, so "+1 (415) 555-0142" and "4155550142" are the same caller."""
+    if any(ch in pattern for ch in "*?["):
+        return fnmatch.fnmatch(number, pattern)
+    a = "".join(c for c in number if c.isdigit())[-10:]
+    b = "".join(c for c in pattern if c.isdigit())[-10:]
+    return bool(a) and a == b
