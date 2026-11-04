@@ -14,10 +14,10 @@
 set -euo pipefail
 
 VERSION=${1:?usage: release.sh <version>}
-git diff --quiet HEAD -- . ../../src || { echo "commit the app and daemon first: the release tags HEAD" >&2; exit 1; }
 : "${TEAM_ID:?set TEAM_ID to your Apple Developer team id}"
 : "${NOTARY_PROFILE:?set NOTARY_PROFILE (see xcrun notarytool store-credentials)}"
 cd "$(dirname "$0")"
+git diff --quiet HEAD -- . ../../src || { echo "commit the app and daemon first: the release tags HEAD" >&2; exit 1; }
 
 DIST=".build/dist"
 OUT="$DIST/Agent-Phone-$VERSION"
