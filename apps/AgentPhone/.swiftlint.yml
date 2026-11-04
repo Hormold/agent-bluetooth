@@ -1,0 +1,63 @@
+# SwiftLint: every opt-in rule on, minus a short list that either fights
+# swift-format (the formatter owns layout, see .swift-format) or doesn't fit a
+# SwiftUI app target. Run with --strict: warnings fail too.
+# Inline `swiftlint:disable:next` only with a reason on the same line.
+included:
+  - Sources
+excluded:
+  - .build
+  - AgentPhone.xcodeproj
+
+opt_in_rules:
+  - all
+
+disabled_rules:
+  # Layout is swift-format's job; these rules want a different layout than it produces.
+  - contrasted_opening_brace
+  - multiline_arguments
+  - multiline_arguments_brackets
+  - multiline_call_arguments
+  - multiline_function_chains
+  - vertical_whitespace_between_cases
+  - trailing_comma
+  - sorted_imports
+  - attributes
+  - switch_case_on_newline        # one-line `case .x: value` switches are the house style
+  - conditional_returns_on_newline  # so are one-line `guard ... else { return }`
+  # Contradictory, or written for library/test code.
+  - explicit_type_interface       # contradicts redundant_type_annotation; inference is idiomatic
+  - explicit_acl                  # app target, no module API: `private` is used where it matters
+  - explicit_top_level_acl
+  - explicit_enum_raw_value       # String-backed ids are meant to equal the case name
+  - required_deinit
+  - one_declaration_per_file      # a screen's small private subviews live next to it
+  - no_grouping_extension         # conformances are grouped in extensions on purpose
+  - type_contents_order           # SwiftUI convention: state, then body, then helpers
+  - file_types_order
+  - sorted_enum_cases             # case order is meaningful (setup checklist order)
+  - no_magic_numbers              # SwiftUI paddings/sizes/durations are design values read in place
+  - discouraged_optional_boolean  # Bool? mirrors optional fields of the daemon's JSON
+
+line_length:
+  warning: 120
+  error: 120
+  ignores_urls: true
+type_body_length:
+  warning: 250
+  error: 300
+file_length:
+  warning: 400
+  error: 450
+function_body_length:
+  warning: 50
+  error: 80
+identifier_name:
+  excluded: [id, at, ts, to, ok]
+cyclomatic_complexity:
+  ignores_case_statements: true  # a flat switch mapping cases to values isn't branching logic
+nesting:
+  type_level: 2  # CodingKeys inside a nested wire type (AppSettings.LiveKit.CodingKeys)
+number_separator:
+  minimum_length: 5  # 8080, 1000: ports and unit factors read better bare
+file_name:
+  excluded: [Models.swift]  # the daemon's wire types, one file on purpose

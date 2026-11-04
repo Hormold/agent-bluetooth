@@ -14,7 +14,8 @@ struct AgentPhoneApp: App {
                     DebugSnapshot.startIfRequested()
                     #endif
                 }
-                .frame(minWidth: 360, idealWidth: 380, maxWidth: 560, minHeight: 540, idealHeight: 620, maxHeight: 1000)
+                .frame(
+                    minWidth: 360, idealWidth: 380, maxWidth: 560, minHeight: 540, idealHeight: 620, maxHeight: 1000)
         }
         .commands {
             CommandGroup(replacing: .appSettings) {

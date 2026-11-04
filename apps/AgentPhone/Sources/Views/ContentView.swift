@@ -9,10 +9,12 @@ struct ContentView: View {
         VStack(spacing: 0) {
             StatusBar(showSettings: $center.settingsOpen, showReadiness: $showReadiness)
             ZStack {
-                if let call = center.call, call.state != "ended" {
-                    CallView(call: call)
-                        .transition(.asymmetric(insertion: .scale(scale: 0.96).combined(with: .opacity),
-                                                removal: .opacity))
+                if let call = center.call, call.state != CallState.ended {
+                    CallView(live: center.live, call: call)
+                        .transition(
+                            .asymmetric(
+                                insertion: .scale(scale: 0.96).combined(with: .opacity),
+                                removal: .opacity))
                 } else if center.setupStep != nil || DemoMode.forceGate {
                     ReadinessView()
                         .transition(.opacity)
@@ -31,18 +33,7 @@ struct ContentView: View {
         .sheet(isPresented: $center.settingsOpen) { SettingsView() }
         .sheet(isPresented: $showReadiness) {
             VStack(spacing: 0) {
-                ZStack {
-                    Text("Setup").font(.headline)
-                    HStack {
-                        Spacer()
-                        Button { showReadiness = false } label: {
-                            Image(systemName: "checkmark").font(.system(size: 12, weight: .bold))
-                                .frame(width: 28, height: 28).background(.quaternary.opacity(0.5), in: Circle())
-                        }
-                        .buttonStyle(PressButtonStyle()).keyboardShortcut(.defaultAction).accessibilityLabel("Done")
-                    }
-                }
-                .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
+                SheetHeader(title: "Setup") { showReadiness = false }
                 ReadinessView(compact: true)
             }
             .frame(width: 420, height: 640)
@@ -50,11 +41,11 @@ struct ContentView: View {
         .task {  // keep the header's setup chip honest
             while !Task.isCancelled {
                 await readiness.refresh(center)
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                try? await Task.sleep(for: .seconds(5))  // cancellation ends the loop on the next check
             }
         }
         .task {
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            try? await Task.sleep(for: .seconds(1.5))  // cancelled with the view: nothing to open
             if DemoMode.openSettings { center.settingsOpen = true }
             if DemoMode.openSetup { showReadiness = true }
         }
@@ -65,8 +56,12 @@ struct ContentView: View {
                     .background(.red, in: Capsule())
                     .padding(.top, 8)
                     .transition(.move(edge: .top).combined(with: .opacity))
-                    .allowsHitTesting(false)   // never block the call buttons below
-                    .task { try? await Task.sleep(nanoseconds: 4_000_000_000); center.error = nil }
+                    .allowsHitTesting(false)  // never block the call buttons below
+                    .task(id: err) {
+                        // Restarted when the message changes: each one gets its own 4 s.
+                        guard (try? await Task.sleep(for: .seconds(4))) != nil else { return }
+                        center.error = nil
+                    }
             }
         }
         .animation(.easeOut(duration: 0.2), value: center.error)
@@ -84,10 +79,12 @@ struct StatusBar: View {
         HStack(spacing: 10) {
             Spacer()
             if center.phone.connected {
-                if let s = center.phone.indicators?.signal { SignalBars(level: s) }
-                if let b = center.phone.indicators?.battchg { BatteryDot(level: b) }
+                if let signal = center.phone.indicators?.signal { SignalBars(level: signal) }
+                if let battery = center.phone.indicators?.battchg { BatteryDot(level: battery) }
             }
-            Button { showReadiness = true } label: {
+            Button {
+                showReadiness = true
+            } label: {
                 StatusChip(text: needsSetup ? "Setup needed" : statusText, tint: needsSetup ? .orange : tint)
             }
             .buttonStyle(PressButtonStyle())
@@ -107,8 +104,8 @@ struct StatusBar: View {
 
     private var statusText: String {
         if center.phone.connected {
-            if let n = center.phone.name, !n.isEmpty { return n }
-            return center.phones.first(where: { $0.connected }).map(\.display) ?? "Connected"
+            if let name = center.phone.name, !name.isEmpty { return name }
+            return center.phones.first(where: \.connected).map(\.display) ?? "Connected"
         }
         if !center.daemonOnline { return "Box offline" }
         return center.phones.isEmpty ? "No phone paired" : "Phone not connected"
@@ -119,10 +116,10 @@ struct SignalBars: View {
     let level: Int  // 0..5
     var body: some View {
         HStack(alignment: .bottom, spacing: 1.5) {
-            ForEach(1...4, id: \.self) { i in
+            ForEach(1...4, id: \.self) { bar in
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(i <= level ? Color.primary.opacity(0.8) : Color.secondary.opacity(0.25))
-                    .frame(width: 3, height: CGFloat(3 + i * 2))
+                    .fill(bar <= level ? Color.primary.opacity(0.8) : Color.secondary.opacity(0.25))
+                    .frame(width: 3, height: CGFloat(3 + bar * 2))
             }
         }
     }
@@ -133,6 +130,7 @@ struct BatteryDot: View {
     var body: some View {
         Image(systemName: level <= 1 ? "battery.25" : (level <= 3 ? "battery.50" : "battery.100"))
             .font(.system(size: 13)).foregroundStyle(.secondary)
+            .accessibilityLabel("Battery")
     }
 }
 
@@ -163,6 +161,7 @@ struct CircleButton: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 26, height: 26)
                 .background(.quaternary.opacity(0.45), in: Circle())
+                .accessibilityHidden(true)
         }
         .buttonStyle(PressButtonStyle())
         .help(label)

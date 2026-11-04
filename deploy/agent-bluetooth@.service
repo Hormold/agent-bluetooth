@@ -1,0 +1,22 @@
+# One daemon per farm instance: systemctl enable --now agent-bluetooth@pixel
+# Instances come from [[instances]] in /etc/agent-bluetooth/config.toml.
+[Unit]
+Description=Agent Bluetooth (%i)
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=all
+WatchdogSec=30
+TimeoutStopSec=10
+KillMode=mixed
+Environment=INSTANCE=%i
+# Optional, board-specific (read it first): reset this instance's dongle before start.
+# ExecStartPre=-/opt/agent-bluetooth/deploy/recover-usb.sh
+ExecStart=/usr/local/bin/agent-bluetooth serve /etc/agent-bluetooth/config.toml --instance %i
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

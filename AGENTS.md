@@ -29,12 +29,29 @@ uv run agent-bluetooth serve config.demo.toml &
 uv run agent-bluetooth watch &                 # observe
 uv run agent-bluetooth sim call number=+1555...; uv run agent-bluetooth play greeting.wav
 uv run agent-bluetooth sim sms text=hi
-uvx ruff check --select E,F,I,B,UP --ignore E501 src
 ```
+Gate (CI runs exactly this; must pass before handoff):
+```bash
+scripts/check.sh   # ruff ALL + format + ty (warnings fatal) + farm smoke on fakes
+```
+Lint policy: every ruff rule is on. Fix the code; a `# noqa: RULE - reason` is
+for lines where the rule is genuinely wrong, and always carries the reason.
+Every task has an owner: whoever starts one holds a `core.tasks.Tasks`
+(`ctx.tasks` for daemon-lifetime work, its own for anything with its own
+lifecycle) and its stop/close awaits `aclose()`; `asyncio.create_task` /
+`ensure_future` are banned elsewhere (ruff TID251). The gate also enforces ty
+`missing-type-argument` + `unsound-return-statement` (validate external values,
+no blanket `cast`/`Any`), import-linter contracts in `.importlinter` (core never
+imports the wiring: type against `core/ports.py` protocols), and a 500-line cap
+per file (`scripts/max_lines.py`). Intentional exits go through
+`core/watchdog.fatal`. No process-global mutable state: one process = one
+instance, but code must not assume it (put per-daemon state on `Context`).
 Prove the event sequence on the surface the user/agent sees, then stop the
 processes you started.
 
 ## Layout
 - `core/` — events, bus, ports, context, router, config. No I/O specifics.
+  `core/instance.py` resolves one config into N independent instances (farm).
+- `farm.py` — supervisor: one process per instance, restarts only the dead one.
 - `adapters/phone|messages|bridge|sinks|audio|bumble` — the swappable edges.
 - `api/` — HTTP + SSE + web UI. `cli.py` + `guide.py` — the agent surface.

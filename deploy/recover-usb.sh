@@ -12,9 +12,25 @@ VID=${VID:-$(grep -oE 'usb:[0-9a-fA-F]{4}' "$CONFIG" | head -1 | cut -d: -f2)}
 VID=${VID:-33fa}
 DRIVER=/sys/bus/platform/drivers/ohci-platform
 
+#   INSTANCE  farm instance this start is for (systemd: Environment=INSTANCE=%i).
+#             Then only that instance's leftover process is reaped, and the
+#             controller is power-cycled only if no sibling daemon is running,
+#             because a controller reset drops every dongle on it.
+STATE=${STATE:-$HOME/.agent-bluetooth${INSTANCE:+/instances/$INSTANCE}}
+
 # 1) reap leftover daemon processes (unclean exit / SIGKILL survivors)
-pkill -9 -f "agent-bluetooth serve" || true
-for i in $(seq 1 10); do pgrep -f "agent-bluetooth serve" >/dev/null || break; sleep 1; done
+if [ -n "$INSTANCE" ]; then
+  PID=$(cat "$STATE/daemon.pid" 2>/dev/null)
+  [ -n "$PID" ] && kill -9 "$PID" 2>/dev/null
+  for i in $(seq 1 10); do [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null || break; sleep 1; done
+  if pgrep -f "agent.bluetooth.* serve" >/dev/null; then
+    echo "recover: sibling instances running; not power-cycling the shared controller"
+    exit 0
+  fi
+else
+  pkill -9 -f "agent.bluetooth.* serve" || true
+  for i in $(seq 1 10); do pgrep -f "agent.bluetooth.* serve" >/dev/null || break; sleep 1; done
+fi
 
 # 2) find the dongle's host controller (e.g. 5311400.usb)
 if [ -z "$CTRL" ]; then
@@ -24,8 +40,8 @@ if [ -z "$CTRL" ]; then
     break
   done
 fi
-[ -n "$CTRL" ] || CTRL=$(cat /root/.agent-bluetooth/usb-controller 2>&1 | grep -E '^[0-9a-f]+\.usb$')
-[ -n "$CTRL" ] && echo "$CTRL" > /root/.agent-bluetooth/usb-controller
+[ -n "$CTRL" ] || CTRL=$(cat "$STATE/usb-controller" 2>&1 | grep -E '^[0-9a-f]+\.usb$')
+[ -n "$CTRL" ] && echo "$CTRL" > "$STATE/usb-controller"
 
 # 3) always power-cycle it, then wait for the dongle to enumerate
 if [ -n "$CTRL" ]; then

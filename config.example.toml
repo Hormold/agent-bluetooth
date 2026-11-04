@@ -59,3 +59,8 @@ adapter = "log"
 # on = "call.ended"
 # do = "shell"
 # cmd = "echo \"$AB_NUMBER $AB_STATE\" >> ~/calls.log"
+
+# Several phones (one dongle each)? Add instances; see docs/FARM.md.
+# [[instances]]
+# name = "pixel"
+# transport = "usb:1-1.2+sco=2"    # from `agent-bluetooth radios`

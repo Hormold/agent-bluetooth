@@ -20,22 +20,28 @@ import asyncio
 import json
 import logging
 import os
+from http import HTTPStatus
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aiohttp
 from dotenv import load_dotenv
-from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
-    JobContext,
     function_tool,
     get_job_context,
     room_io,
 )
 from livekit.agents.beta.tools import EndCallTool
 from livekit.plugins import openai
+
+if TYPE_CHECKING:
+    from livekit import rtc
+    from livekit.agents import (
+        JobContext,
+    )
 
 load_dotenv()
 log = logging.getLogger("phone-agent")
@@ -103,9 +109,7 @@ class PhoneAgent(Agent):
         )
 
     def _heard_them(self) -> bool:
-        return any(
-            getattr(i, "role", None) == "user" for i in self.session.history.items
-        )
+        return any(getattr(i, "role", None) == "user" for i in self.session.history.items)
 
     @function_tool
     async def press_keys(self, digits: str) -> str:
@@ -131,12 +135,13 @@ async def place_call(room: str, number: str) -> None:
         aiohttp.ClientSession() as http,
         http.post(f"{DAEMON}/api/calls", json={"number": number, "room": room}) as resp,
     ):
-        if resp.status != 200:
+        if resp.status != HTTPStatus.OK:
             raise RuntimeError(f"agent-bluetooth: {resp.status} {await resp.text()}")
 
 
-async def wait_until_answered(ctx: JobContext, timeout: float) -> bool:
-    """Like wait_until_answered=True: True once the callee picks up."""
+async def wait_until_answered(ctx: JobContext) -> bool:
+    """Like wait_until_answered=True: True once the callee picks up, False on
+    hangup. The caller bounds the wait with asyncio.timeout."""
     phone = await ctx.wait_for_participant(identity=PHONE)
     status: asyncio.Queue[str] = asyncio.Queue()
 
@@ -147,11 +152,8 @@ async def wait_until_answered(ctx: JobContext, timeout: float) -> bool:
 
     current = phone.attributes.get("sip.callStatus", "")
     try:
-        async with asyncio.timeout(timeout):
-            while current not in ("active", "hangup"):
-                current = await status.get()
-    except TimeoutError:
-        return False
+        while current not in ("active", "hangup"):
+            current = await status.get()
     finally:
         ctx.room.off("participant_attributes_changed", _changed)
     return current == "active"
@@ -159,12 +161,25 @@ async def wait_until_answered(ctx: JobContext, timeout: float) -> bool:
 
 def save_transcript(ctx: JobContext, session: AgentSession, info: dict) -> None:
     async def write() -> None:
-        TRANSCRIPTS.mkdir(exist_ok=True)
         path = TRANSCRIPTS / f"{ctx.room.name}.json"
-        path.write_text(json.dumps({**info, **session.history.to_dict()}, indent=2))
+        data = json.dumps({**info, **session.history.to_dict()}, indent=2)
+        await asyncio.to_thread(_write_file, path, data)
         log.info("transcript: %s", path)
 
     ctx.add_shutdown_callback(write)
+
+
+def _write_file(path: Path, data: str) -> None:
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(data)
+
+
+async def answered_in_time(ctx: JobContext) -> bool:
+    try:
+        async with asyncio.timeout(ANSWER_TIMEOUT):
+            return await wait_until_answered(ctx)
+    except TimeoutError:
+        return False
 
 
 server = AgentServer()
@@ -186,7 +201,7 @@ async def phone_agent(ctx: JobContext) -> None:
     number = dial or attrs.get("sip.phoneNumber") or meta.get("number") or "unknown"
 
     if dial or attrs.get("phone.direction") == "out":
-        if not await wait_until_answered(ctx, ANSWER_TIMEOUT):
+        if not await answered_in_time(ctx):
             log.info("%s didn't answer", number)
             ctx.shutdown()
             return
@@ -195,9 +210,7 @@ async def phone_agent(ctx: JobContext) -> None:
     else:
         known = attrs.get("phone.contact") == "true"
         log.info("call from %s", number)
-        agent = PhoneAgent(
-            number=number, name=attrs.get("phone.name", "") if known else ""
-        )
+        agent = PhoneAgent(number=number, name=attrs.get("phone.name", "") if known else "")
 
     # Started once someone's on the line, as LiveKit's outbound guide advises.
     session = AgentSession(llm=openai.realtime.RealtimeModel(voice="marin"))

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import sys
+from typing import TYPE_CHECKING, Any
 
-from ...core.context import Context
-from ...core.events import Event
+if TYPE_CHECKING:
+    from ...core.context import Context
+    from ...core.events import Event
 
 
 class LogSink:
@@ -15,4 +17,5 @@ class LogSink:
 
     async def handle(self, event: Event) -> None:
         if not self.events or event.type in self.events:
-            print(json.dumps(event.to_dict(), ensure_ascii=False), flush=True)
+            sys.stdout.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+            sys.stdout.flush()

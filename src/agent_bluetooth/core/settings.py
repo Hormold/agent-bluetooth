@@ -14,14 +14,26 @@ import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .ports import PCM_BYTES_PER_SAMPLE
+
 if TYPE_CHECKING:
-    from ..app import App
+    from .ports import SettingsHost
+    from .router import CallRouter
 
 log = logging.getLogger(__name__)
 
 FIELDS = ("incoming", "outgoing", "agent_name", "play_file", "stall_dir", "answer")
 RECORD_FIELDS = ("record_calls", "record_dir")  # global: every call, any mode
 LIVEKIT_FIELDS = ("url", "client_url", "api_key", "api_secret")
+MODES = {"app", "agent", "play", "ignore", "stall"}  # "reject" is incoming-only
+ANSWER_MODES = {"auto", "on_join", "manual"}
+URL_SCHEMES = ("ws://", "wss://", "http://", "https://")
+WAV_CHANNELS = (1, 2)  # mono or stereo
+
+
+class SettingsTypeError(TypeError, ValueError):
+    """A setting has the wrong JSON type. Still a ValueError, so the API answers
+    400 like every other invalid setting."""
 
 
 class SettingsStore:
@@ -41,7 +53,7 @@ class SettingsStore:
         self.path.write_text(json.dumps(data, indent=2))
 
 
-def current(app: App) -> dict[str, Any]:
+def current(app: SettingsHost) -> dict[str, Any]:
     r = app.router
     out: dict[str, Any] = {
         "incoming": r.incoming_mode,
@@ -96,10 +108,9 @@ def _who(rule: dict[str, Any]) -> str:
     return " and ".join(parts) or "any number"
 
 
-def _describe(r, mode: str, direction: str, rule: dict[str, Any] | None = None) -> str:
+def _describe(r: CallRouter, mode: str, direction: str, rule: dict[str, Any] | None = None) -> str:
     rule = rule or {}
     play_path = rule.get("play_file") or r.play_path
-    agent_name = rule.get("agent_name") or r.agent_name
     incoming = direction == "in"
     if mode == "stall":
         folder = rule.get("stall_dir") or r.stall_dir or "(no stall_dir set)"
@@ -114,23 +125,27 @@ def _describe(r, mode: str, direction: str, rule: dict[str, Any] | None = None) 
     if mode == "play" and play_path:
         start = "answered automatically and " if incoming else "when connected, "
         return f"{start}{Path(play_path).name} is played, then hung up"
-    if mode in ("app", "agent") or (mode == "play" and not play_path):
-        if not incoming:
-            answer = "when connected, audio goes to a LiveKit room"
-        elif r.answer_mode == "on_join":
-            answer = "a LiveKit room opens; answered when a participant joins"
-        else:
-            answer = "answered automatically; audio goes to a LiveKit room"
-        if mode == "agent":
-            answer += (
-                f"; dispatch agent {agent_name!r}"
-                if agent_name
-                else "; no agent_name configured, so no agent is dispatched"
-            )
-        if mode == "play":
-            answer += "; no play_file configured, so room fallback is used"
-        return answer
+    if mode in ("app", "agent", "play"):  # play without a file falls back to a room
+        return _describe_room(r, mode, rule.get("agent_name") or r.agent_name, incoming=incoming)
     return f"no automatic handling for mode {mode!r}; use app, agent, play, record or ignore"
+
+
+def _describe_room(r: CallRouter, mode: str, agent_name: str, *, incoming: bool) -> str:
+    if not incoming:
+        answer = "when connected, audio goes to a LiveKit room"
+    elif r.answer_mode == "on_join":
+        answer = "a LiveKit room opens; answered when a participant joins"
+    else:
+        answer = "answered automatically; audio goes to a LiveKit room"
+    if mode == "agent":
+        answer += (
+            f"; dispatch agent {agent_name!r}"
+            if agent_name
+            else "; no agent_name configured, so no agent is dispatched"
+        )
+    if mode == "play":
+        answer += "; no play_file configured, so room fallback is used"
+    return answer
 
 
 def validate_wav(path: str) -> None:
@@ -139,11 +154,12 @@ def validate_wav(path: str) -> None:
         raise ValueError("play_file must be an absolute path on the daemon's machine")
     try:
         with wave.open(path, "rb") as wav:
-            if wav.getsampwidth() != 2 or wav.getcomptype() != "NONE":
+            if wav.getsampwidth() != PCM_BYTES_PER_SAMPLE or wav.getcomptype() != "NONE":
                 raise ValueError("play_file must be an uncompressed 16-bit PCM WAV")
-            if wav.getnchannels() not in (1, 2):
+            channels = wav.getnchannels()
+            if channels not in WAV_CHANNELS:
                 raise ValueError("play_file must be a mono or stereo 16-bit PCM WAV")
-            if not wav.getnframes() or len(wav.readframes(1)) != 2 * wav.getnchannels():
+            if not wav.getnframes() or len(wav.readframes(1)) != PCM_BYTES_PER_SAMPLE * channels:
                 raise ValueError("play_file contains no readable audio frames")
     except (OSError, wave.Error, EOFError) as exc:
         raise ValueError(
@@ -151,58 +167,67 @@ def validate_wav(path: str) -> None:
         ) from exc
 
 
-def validate(app: App, data: dict[str, Any]) -> None:
+def validate(app: SettingsHost, data: dict[str, Any]) -> None:
     if not isinstance(data, dict):
-        raise ValueError("Settings must be a JSON object")
+        raise SettingsTypeError("Settings must be a JSON object")
     unknown = set(data) - {*FIELDS, *RECORD_FIELDS, "livekit", "rules"}
     if unknown:
         raise ValueError(f"Unknown settings: {', '.join(sorted(unknown))}")
-    for field in FIELDS:
-        if field in data and not isinstance(data[field], str):
-            raise ValueError(f"{field} must be a string")
-    if "record_calls" in data and not isinstance(data["record_calls"], bool):
-        raise ValueError("record_calls must be true or false")
+    _validate_types(data)
     if "record_dir" in data:
         validate_record_dir(data["record_dir"])
-    modes = {"app", "agent", "play", "ignore", "stall"}
-    for field in ("incoming", "outgoing"):
-        allowed = modes | ({"reject"} if field == "incoming" else set())
-        if field in data and data[field] not in allowed:
-            raise ValueError(f"{field} must be one of: {', '.join(sorted(allowed))}")
-    if "answer" in data and data["answer"] not in {"auto", "on_join", "manual"}:
-        raise ValueError(
-            "answer must be auto, on_join or manual; use incoming=ignore for manual call control"
-        )
+    _validate_modes(data)
     if "livekit" in data:
-        lk = data["livekit"]
-        if not isinstance(lk, dict):
-            raise ValueError("livekit must be a JSON object")
-        bad = set(lk) - set(LIVEKIT_FIELDS)
-        if bad:
-            raise ValueError(
-                f"Unknown livekit settings: {', '.join(sorted(bad))} (use {', '.join(LIVEKIT_FIELDS)})"
-            )
-        for k, v in lk.items():
-            if not isinstance(v, str):
-                raise ValueError(f"livekit.{k} must be a string")
-        for k in ("url", "client_url"):
-            v = lk.get(k)
-            if v and not v.startswith(("ws://", "wss://", "http://", "https://")):
-                raise ValueError(
-                    f"livekit.{k} must start with ws://, wss://, http:// or https://"
-                )
+        _validate_livekit(data["livekit"])
     if "rules" in data:
         validate_rules(
             data["rules"],
             data.get("play_file") or app.router.play_path,
             data.get("stall_dir") or app.router.stall_dir,
         )
+    _validate_media(app, data)
+
+
+def _validate_types(data: dict[str, Any]) -> None:
+    for field in FIELDS:
+        if field in data and not isinstance(data[field], str):
+            raise SettingsTypeError(f"{field} must be a string")
+    if "record_calls" in data and not isinstance(data["record_calls"], bool):
+        raise SettingsTypeError("record_calls must be true or false")
+
+
+def _validate_modes(data: dict[str, Any]) -> None:
+    for field in ("incoming", "outgoing"):
+        allowed = MODES | ({"reject"} if field == "incoming" else set())
+        if field in data and data[field] not in allowed:
+            raise ValueError(f"{field} must be one of: {', '.join(sorted(allowed))}")
+    if "answer" in data and data["answer"] not in ANSWER_MODES:
+        raise ValueError(
+            "answer must be auto, on_join or manual; use incoming=ignore for manual call control"
+        )
+
+
+def _validate_livekit(lk: object) -> None:
+    if not isinstance(lk, dict):
+        raise SettingsTypeError("livekit must be a JSON object")
+    bad = set(lk) - set(LIVEKIT_FIELDS)
+    if bad:
+        raise ValueError(
+            f"Unknown livekit settings: {', '.join(sorted(bad))} (use {', '.join(LIVEKIT_FIELDS)})"
+        )
+    for k, v in lk.items():
+        if not isinstance(v, str):
+            raise SettingsTypeError(f"livekit.{k} must be a string")
+    for k in ("url", "client_url"):
+        v = lk.get(k)
+        if v and not v.startswith(URL_SCHEMES):
+            raise ValueError(f"livekit.{k} must start with ws://, wss://, http:// or https://")
+
+
+def _validate_media(app: SettingsHost, data: dict[str, Any]) -> None:
+    """The files the resulting modes will play must exist and be readable now."""
     merged = {**current(app), **data}
-    if (
-        merged["incoming"] == "play"
-        or merged["outgoing"] == "play"
-        or data.get("play_file")
-    ):
+    if merged["incoming"] == "play" or merged["outgoing"] == "play" or data.get("play_file"):
         validate_wav(merged["play_file"])
     if merged["incoming"] == "stall" or merged["outgoing"] == "stall":
         validate_stall_dir(merged.get("stall_dir", ""))
@@ -221,23 +246,25 @@ RULE_KEYS = {
 RULE_MODES = {"app", "agent", "play", "reject", "ignore", "stall"}
 
 
-def validate_record_dir(folder: Any) -> None:
+def validate_record_dir(folder: object) -> None:
     if not isinstance(folder, str) or not folder.strip():
         raise ValueError("record_dir must be a folder path")
     path = Path(folder).expanduser()
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise ValueError(
-            f"Cannot create record_dir {folder!r}: {exc.strerror}"
-        ) from exc
+        raise ValueError(f"Cannot create record_dir {folder!r}: {exc.strerror}") from exc
     if not os.access(path, os.W_OK):
         raise ValueError(f"record_dir {folder!r} is not writable")
 
 
-def validate_stall_dir(folder: str) -> None:
-    from ..adapters.audio.stall import phrases_in
+def phrases_in(folder: str) -> list[Path]:
+    """What a stall_dir holds: its .wav files, in a stable order. The stall
+    player reads exactly this, so validation and playback agree."""
+    return sorted(p for p in Path(folder).expanduser().glob("*.wav") if p.is_file())
 
+
+def validate_stall_dir(folder: str) -> None:
     if not folder:
         raise ValueError("stall mode needs stall_dir: a folder of 16-bit WAV phrases")
     if not Path(folder).expanduser().is_dir():
@@ -249,58 +276,65 @@ def validate_stall_dir(folder: str) -> None:
         validate_wav(str(clip))
 
 
-def validate_rules(rules: Any, default_play: str = "", default_stall: str = "") -> None:
+def validate_rules(rules: object, default_play: str = "", default_stall: str = "") -> None:
     """Rules route a call by who calls. First match wins. Each rule:
     {direction: in|out|any, when_number: glob, when_contact: bool,
      mode: app|agent|play|reject|ignore|stall, agent_name?, play_file?, stall_dir?}"""
     if not isinstance(rules, list):
-        raise ValueError("rules must be a list")
+        raise SettingsTypeError("rules must be a list")
     for i, rule in enumerate(rules):
         where = f"rules[{i}]"
         if not isinstance(rule, dict):
-            raise ValueError(f"{where} must be an object")
-        bad = set(rule) - RULE_KEYS
-        if bad:
-            raise ValueError(f"{where}: unknown keys {', '.join(sorted(bad))}")
-        mode = rule.get("mode", rule.get("action"))
-        if mode not in RULE_MODES:
-            raise ValueError(
-                f"{where}: mode must be one of {', '.join(sorted(RULE_MODES))}"
-            )
-        if rule.get("direction", "in") not in {"in", "out", "any"}:
-            raise ValueError(f"{where}: direction must be in, out or any")
-        if "when_contact" in rule and not isinstance(rule["when_contact"], bool):
-            raise ValueError(f"{where}: when_contact must be true or false")
-        for k in ("when_number", "agent_name", "play_file", "stall_dir"):
-            if k in rule and not isinstance(rule[k], str):
-                raise ValueError(f"{where}: {k} must be a string")
+            raise SettingsTypeError(f"{where} must be an object")
+        mode = _validate_rule_shape(where, rule)
         if mode == "play":
             validate_wav(rule.get("play_file") or default_play)
         if mode == "stall":
             validate_stall_dir(rule.get("stall_dir") or default_stall)
 
 
-def apply(app: App, data: dict[str, Any]) -> None:
+def _validate_rule_shape(where: str, rule: dict[str, Any]) -> str:
+    """Keys, mode, direction and value types of one rule; returns its mode."""
+    bad = set(rule) - RULE_KEYS
+    if bad:
+        raise ValueError(f"{where}: unknown keys {', '.join(sorted(bad))}")
+    mode = rule.get("mode", rule.get("action"))
+    if not isinstance(mode, str) or mode not in RULE_MODES:
+        raise ValueError(f"{where}: mode must be one of {', '.join(sorted(RULE_MODES))}")
+    if rule.get("direction", "in") not in {"in", "out", "any"}:
+        raise ValueError(f"{where}: direction must be in, out or any")
+    if "when_contact" in rule and not isinstance(rule["when_contact"], bool):
+        raise SettingsTypeError(f"{where}: when_contact must be true or false")
+    for k in ("when_number", "agent_name", "play_file", "stall_dir"):
+        if k in rule and not isinstance(rule[k], str):
+            raise SettingsTypeError(f"{where}: {k} must be a string")
+    return mode
+
+
+# setting -> (router attribute, coercion); "rules" is copied, not coerced.
+_ROUTER_ATTRS: dict[str, tuple[str, type]] = {
+    "incoming": ("incoming_mode", str),
+    "outgoing": ("outgoing_mode", str),
+    "agent_name": ("agent_name", str),
+    "play_file": ("play_path", str),
+    "stall_dir": ("stall_dir", str),
+    "answer": ("answer_mode", str),
+    "record_calls": ("record_calls", bool),
+    "record_dir": ("record_dir", str),
+}
+
+
+def apply(app: SettingsHost, data: dict[str, Any]) -> None:
     r = app.router
     if "rules" in data:
         r.rules = list(data["rules"])
-    if "incoming" in data:
-        r.incoming_mode = str(data["incoming"])
-    if "outgoing" in data:
-        r.outgoing_mode = str(data["outgoing"])
-    if "agent_name" in data:
-        r.agent_name = str(data["agent_name"])
-    if "play_file" in data:
-        r.play_path = str(data["play_file"])
-    if "stall_dir" in data:
-        r.stall_dir = str(data["stall_dir"])
-    if "answer" in data:
-        r.answer_mode = str(data["answer"])
-    if "record_calls" in data:
-        r.record_calls = bool(data["record_calls"])
-    if "record_dir" in data:
-        r.record_dir = str(data["record_dir"])
-    lk = dict(data.get("livekit") or {})
+    for key, (attr, coerce) in _ROUTER_ATTRS.items():
+        if key in data:
+            setattr(r, attr, coerce(data[key]))
+    _apply_livekit(app, dict(data.get("livekit") or {}))
+
+
+def _apply_livekit(app: SettingsHost, lk: dict[str, Any]) -> None:
     bridge = app.bridge
     # client_url (what apps connect to) usually just mirrors url. If it did,
     # move it along with url; keep it only if it was set to something else.
@@ -311,5 +345,5 @@ def apply(app: App, data: dict[str, Any]) -> None:
     ):
         lk["client_url"] = lk["url"]
     for f in LIVEKIT_FIELDS:
-        if f in lk and lk[f]:
+        if lk.get(f):
             setattr(bridge, f, str(lk[f]))

@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from bumble import rfcomm
 from bumble.core import UUID
-from bumble.device import Connection
 
 from .obex import ObexClient, app_params
-from .radio import BumbleRadio
+
+if TYPE_CHECKING:
+    from bumble.device import Connection
+
+    from .radio import BumbleRadio
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +39,7 @@ class Contact:
     name: str
     numbers: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, str | list[str]]:
         return {"name": self.name, "numbers": self.numbers}
 
 
@@ -46,7 +50,7 @@ class HistoryEntry:
     kind: str  # received | dialed | missed | ""
     at: str
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, str]:
         return {
             "name": self.name,
             "number": self.number,
@@ -83,16 +87,9 @@ class BumblePbap:
                 # contact PHOTOs and turns a phonebook pull into minutes.
                 flt=(T_FILTER, 8, fields),
             )
-            return (await obex.get(TYPE_PHONEBOOK, obj, params)).decode(
-                "utf-8", "replace"
-            )
+            return (await obex.get(TYPE_PHONEBOOK, obj, params)).decode("utf-8", "replace")
         finally:
-            with_close = getattr(obex.dlc, "disconnect", None)
-            if with_close:
-                try:
-                    await obex.dlc.disconnect()
-                except Exception:
-                    pass
+            await obex.aclose()
 
     def _connection(self, address: str) -> Connection | None:
         for c in self.radio.device.connections.values():
@@ -102,11 +99,7 @@ class BumblePbap:
 
     async def contacts(self, address: str, limit: int = 1000) -> list[Contact]:
         vcf = await self._pull(address, PB_CONTACTS, limit, CONTACT_FIELDS)
-        out = [
-            c
-            for c in (_parse_contact(v) for v in _split_vcards(vcf))
-            if c and c.numbers
-        ]
+        out = [c for c in (_parse_contact(v) for v in _split_vcards(vcf)) if c and c.numbers]
         log.info("PBAP: %d contacts", len(out))
         return out
 
@@ -118,7 +111,8 @@ class BumblePbap:
 
 
 def _split_vcards(text: str) -> list[str]:
-    cards, cur = [], []
+    cards: list[str] = []
+    cur: list[str] = []
     for line in text.splitlines():
         if line.startswith("BEGIN:VCARD"):
             cur = []

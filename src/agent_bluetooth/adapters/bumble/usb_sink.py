@@ -15,27 +15,37 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import logging
 
 import usb1
 from bumble import hci
 from bumble.transport import usb as bumble_usb
 
+from ...core.tasks import Tasks
+
 log = logging.getLogger(__name__)
 ISO_TRANSFERS = 4  # in flight at once; Linux wants >= 2 for continuous streaming
 MAX_QUEUED_SCO = 50  # ~ a few hundred ms of CVSD; older audio is dropped
+CANCEL_DRAIN_TIMEOUT = 2.0  # s to wait for libusb to return cancelled ISO transfers
 
 
 class ScoLaneSink(bumble_usb.UsbPacketSink):
-    def __init__(self, device, bulk_out, isochronous_out, interface_number=0) -> None:
+    def __init__(
+        self,
+        device: usb1.USBDeviceHandle,
+        bulk_out: usb1.USBEndpoint,
+        isochronous_out: usb1.USBEndpoint | None,
+        interface_number: int = 0,
+    ) -> None:
         super().__init__(device, bulk_out, isochronous_out, interface_number)
         self._free: asyncio.Queue[usb1.USBTransfer] = asyncio.Queue()
         self._in_flight: set[usb1.USBTransfer] = set()
         self._sco: collections.deque[bytes] = collections.deque(maxlen=MAX_QUEUED_SCO)
         self._sco_ready = asyncio.Event()
-        self._sco_task: asyncio.Task | None = None
+        self._tasks = Tasks("usb-sco-lane")  # Bumble builds the sink: no Context to borrow
         self._drained = asyncio.Event()
-        if self.isochronous_out_transfer is not None:
+        if self.isochronous_out_transfer is not None and isochronous_out is not None:
             mps = isochronous_out.getMaxPacketSize()
             iso_packets = bumble_usb.MAX_SCO_PACKET_SIZE // mps if mps else 1
             self._free.put_nowait(self.isochronous_out_transfer)
@@ -50,7 +60,7 @@ class ScoLaneSink(bumble_usb.UsbPacketSink):
     def start(self) -> None:
         super().start()
         if self._has_iso:
-            self._sco_task = asyncio.create_task(self._sco_loop())
+            self._tasks.spawn(self._sco_loop(), name="usb-sco-lane")
 
     def on_packet(self, packet: bytes) -> None:
         if not self.closed and packet and packet[0] == hci.HCI_SYNCHRONOUS_DATA_PACKET:
@@ -83,13 +93,16 @@ class ScoLaneSink(bumble_usb.UsbPacketSink):
                 )
                 transfer.submit()
                 self._in_flight.add(transfer)
-            except Exception as e:
-                log.warning("SCO submit failed: %s", e)
+            except Exception:  # hardware I/O: a failed submit must not kill the SCO lane
+                log.warning("SCO submit failed", exc_info=True)
                 self._free.put_nowait(transfer)
 
     def _iso_done(self, transfer: usb1.USBTransfer) -> None:
-        # libusb event thread -> hand the transfer back on the asyncio loop
-        bumble_usb._safe_call_soon(self.loop, self._recycle, transfer)
+        # libusb event thread -> hand the transfer back on the asyncio loop. A
+        # callback after the loop closed (teardown) must be a no-op: raising on
+        # libusb's C thread can abort the whole process.
+        with contextlib.suppress(RuntimeError):
+            self.loop.call_soon_threadsafe(self._recycle, transfer)
 
     def _recycle(self, transfer: usb1.USBTransfer) -> None:
         self._in_flight.discard(transfer)
@@ -103,8 +116,7 @@ class ScoLaneSink(bumble_usb.UsbPacketSink):
         # back. Closing the device with ISO transfers still pending wedges the
         # kernel USB stack (process stuck in D state, only a reboot clears it).
         self.closed = True
-        if self._sco_task:
-            self._sco_task.cancel()
+        await self._tasks.aclose()  # no new SCO submits while in-flight ones are cancelled
         self._sco.clear()
         if self._in_flight:
             self._drained.clear()
@@ -115,7 +127,7 @@ class ScoLaneSink(bumble_usb.UsbPacketSink):
                     self._in_flight.discard(transfer)  # already completed
             if self._in_flight:
                 try:
-                    await asyncio.wait_for(self._drained.wait(), timeout=2)
+                    await asyncio.wait_for(self._drained.wait(), timeout=CANCEL_DRAIN_TIMEOUT)
                 except TimeoutError:
                     log.warning("%d SCO transfers did not cancel", len(self._in_flight))
         await super().terminate()
@@ -126,4 +138,5 @@ def install() -> None:
 
     Don't shrink Bumble's ISO IN batches (MAX_SCO_IN_PACKETS): 4 x 16 ms on
     this OHCI port stalled ACL even with no call up."""
-    bumble_usb.UsbPacketSink = ScoLaneSink
+    # Monkey-patch by design: Bumble builds the sink inside open_usb_transport.
+    bumble_usb.UsbPacketSink = ScoLaneSink  # ty: ignore[invalid-assignment] - subclass swap

@@ -3,32 +3,42 @@ setups (events + SMS + automations) and for bring-up before LiveKit is wired."""
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ...core.context import Context
-from ...core.ports import AudioPipe, Call
+from ...core.tasks import Tasks
+
+if TYPE_CHECKING:
+    import asyncio
+
+    from ...core.context import Context
+    from ...core.ports import AudioPipe, Call
 
 
 class NullBridge:
     def __init__(self, ctx: Context, cfg: dict[str, Any]) -> None:
-        self._tasks: dict[str, asyncio.Task] = {}
+        self._tasks = Tasks(f"{ctx.bus.instance}:null-bridge")
+        self._drains: dict[str, tuple[AudioPipe, asyncio.Task[None]]] = {}
 
     async def start(self) -> None: ...
 
     async def stop(self) -> None:
-        for t in self._tasks.values():
-            t.cancel()
+        self._drains.clear()
+        await self._tasks.aclose()
 
-    async def open(self, call: Call) -> dict[str, Any]:
-        return {"room": None}
+    async def open(self, call: Call, *, agent_name: str = "") -> dict[str, Any]:
+        return {"room": None}  # no room, so no agent to dispatch either
 
     async def attach_audio(self, call: Call, audio: AudioPipe) -> None:
-        self._tasks[call.id] = asyncio.create_task(self._drain(audio))
+        current = self._drains.get(call.id)
+        if current and current[0] is audio and not current[1].done():
+            return  # audio-up is announced more than once per link
+        await self.close(call)
+        drain = self._tasks.spawn(self._drain(audio), name=f"null-drain:{call.id}")
+        self._drains[call.id] = (audio, drain)
 
     async def close(self, call: Call) -> None:
-        if t := self._tasks.pop(call.id, None):
-            t.cancel()
+        if drain := self._drains.pop(call.id, None):
+            drain[1].cancel()
 
     def join_info(self, room: str, identity: str) -> dict[str, Any]:
         return {}

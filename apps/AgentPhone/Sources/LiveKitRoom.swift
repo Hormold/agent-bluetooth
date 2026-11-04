@@ -11,18 +11,20 @@ final class LiveKitRoom: ObservableObject {
     @Published var remoteLevel: Float = 0
     @Published var stats = WebRTCStats()
 
+    private static let sampleInterval = Duration.milliseconds(250)
+
     private var room: Room?
-    private var levelTimer: Timer?
+    private var meter: Task<Void, Never>?
 
     func join(url: String, token: String) async throws {
-        guard !joining && !joined else { return }
+        guard !joining, !joined else { return }
         joining = true
         defer { joining = false }
         await leave()
-        let room = Room(roomOptions: RoomOptions(reportRemoteTrackStatistics: true))
-        self.room = room
-        try await room.connect(url: url, token: token)
-        try await room.localParticipant.setMicrophone(enabled: true)
+        let newRoom = Room(roomOptions: RoomOptions(reportRemoteTrackStatistics: true))
+        room = newRoom
+        try await newRoom.connect(url: url, token: token)
+        try await newRoom.localParticipant.setMicrophone(enabled: true)
         joined = true
         muted = false
         startLevelMeter()
@@ -40,15 +42,17 @@ final class LiveKitRoom: ObservableObject {
         try await room.localParticipant.publishDtmf(code: UInt32(code), digit: digit)
     }
 
-    func toggleMute() async {
+    /// Flips the mic. The button shows `muted`, so it only changes once the
+    /// mic really did: a failed mute must not look like one.
+    func toggleMute() async throws {
         guard let room else { return }
+        try await room.localParticipant.setMicrophone(enabled: muted)
         muted.toggle()
-        try? await room.localParticipant.setMicrophone(enabled: !muted)
     }
 
     func leave() async {
-        levelTimer?.invalidate()
-        levelTimer = nil
+        meter?.cancel()
+        meter = nil
         if let room { await room.disconnect() }
         room = nil
         joined = false
@@ -62,43 +66,65 @@ final class LiveKitRoom: ObservableObject {
     /// updates, which a narrowband line never triggers. The inbound RTP stats
     /// carry the real level.)
     private func startLevelMeter() {
-        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.sample() }
+        meter?.cancel()
+        meter = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.sampleInterval)  // cancellation ends the loop on the next check
+                self?.sample()
+            }
         }
     }
 
-    private var last: (at: Date, bytes: UInt64, jbDelay: Double, jbCount: UInt64)?
+    /// Cumulative inbound counters at the previous sample.
+    private struct Counters {
+        let at: Date
+        let bytes: UInt64
+        let jitterBufferDelay: Double
+        let jitterBufferCount: UInt64
+    }
+
+    private static let millisPerSecond = 1000.0
+
+    private var last: Counters?
 
     private func sample() {
         guard let room else { return }
         let track = room.remoteParticipants.values
-            .flatMap { $0.audioTracks }
+            .flatMap(\.audioTracks)
             .compactMap { $0.track as? RemoteAudioTrack }
             .first
-        guard let st = track?.statistics else { return }
-        var s = stats
-        if let rtp = st.inboundRtpStream.first {
+        guard let statistics = track?.statistics else { return }
+        var next = stats
+        if let rtp = statistics.inboundRtpStream.first {
             remoteLevel = Float(rtp.audioLevel ?? 0)
-            s.jitterMs = (rtp.jitter ?? 0) * 1000
-            let received = Double(rtp.packetsReceived ?? 0), lost = Double(max(0, rtp.packetsLost ?? 0))
-            s.lossPct = received + lost > 0 ? lost / (received + lost) * 100 : 0
+            next.jitterMs = (rtp.jitter ?? 0) * Self.millisPerSecond
+            let received = Double(rtp.packetsReceived ?? 0)
+            let lost = Double(max(0, rtp.packetsLost ?? 0))
+            next.lossPct = received + lost > 0 ? lost / (received + lost) * 100 : 0
             if let total = rtp.totalSamplesReceived, total > 0 {
-                s.concealedPct = Double(rtp.concealedSamples ?? 0) / Double(total) * 100
+                next.concealedPct = Double(rtp.concealedSamples ?? 0) / Double(total) * 100
             }
             // Bitrate and jitter-buffer delay as deltas since the previous sample:
             // the raw counters are cumulative since the call started.
-            let now = Date(), bytes = rtp.bytesReceived ?? 0
-            let jbDelay = rtp.jitterBufferDelay ?? 0, jbCount = rtp.jitterBufferEmittedCount ?? 0
-            if let p = last {
-                let dt = now.timeIntervalSince(p.at)
-                if dt > 0, bytes >= p.bytes { s.kbps = Double(bytes - p.bytes) * 8 / dt / 1000 }
-                if jbCount > p.jbCount { s.bufferMs = (jbDelay - p.jbDelay) / Double(jbCount - p.jbCount) * 1000 }
+            let now = Counters(
+                at: Date(), bytes: rtp.bytesReceived ?? 0, jitterBufferDelay: rtp.jitterBufferDelay ?? 0,
+                jitterBufferCount: rtp.jitterBufferEmittedCount ?? 0)
+            if let previous = last {
+                let elapsed = now.at.timeIntervalSince(previous.at)
+                if elapsed > 0, now.bytes >= previous.bytes {
+                    next.kbps = Double(now.bytes - previous.bytes) * 8 / elapsed / Self.millisPerSecond
+                }
+                if now.jitterBufferCount > previous.jitterBufferCount {
+                    let emitted = Double(now.jitterBufferCount - previous.jitterBufferCount)
+                    next.bufferMs =
+                        (now.jitterBufferDelay - previous.jitterBufferDelay) / emitted * Self.millisPerSecond
+                }
             }
-            last = (now, bytes, jbDelay, jbCount)
+            last = now
         }
-        s.codec = st.codec.first?.mimeType?.replacingOccurrences(of: "audio/", with: "") ?? ""
-        s.rttMs = (st.iceCandidatePair.compactMap { $0.currentRoundTripTime }.first ?? 0) * 1000
-        stats = s
+        next.codec = statistics.codec.first?.mimeType?.replacingOccurrences(of: "audio/", with: "") ?? ""
+        next.rttMs = (statistics.iceCandidatePair.compactMap(\.currentRoundTripTime).first ?? 0) * Self.millisPerSecond
+        stats = next
     }
 }
 

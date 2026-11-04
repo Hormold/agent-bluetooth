@@ -4,9 +4,11 @@ your own class directly: adapter = "my_package.my_module:MyPhone"."""
 from __future__ import annotations
 
 import importlib
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
-from .core.context import Context
+if TYPE_CHECKING:
+    from .core.context import Context
+    from .core.ports import Bridge, Directory, Messages, Phone, Sink
 
 _P = "agent_bluetooth.adapters"
 ADAPTERS: dict[str, dict[str, str]] = {
@@ -34,13 +36,25 @@ ADAPTERS: dict[str, dict[str, str]] = {
 }
 
 
-def build(kind: str, cfg: dict[str, Any], ctx: Context) -> Any:
+@overload
+def build(kind: Literal["phone"], cfg: dict[str, Any], ctx: Context) -> Phone: ...
+@overload
+def build(kind: Literal["messages"], cfg: dict[str, Any], ctx: Context) -> Messages: ...
+@overload
+def build(kind: Literal["directory"], cfg: dict[str, Any], ctx: Context) -> Directory: ...
+@overload
+def build(kind: Literal["bridge"], cfg: dict[str, Any], ctx: Context) -> Bridge: ...
+@overload
+def build(kind: Literal["sink"], cfg: dict[str, Any], ctx: Context) -> Sink: ...
+def build(
+    kind: str, cfg: dict[str, Any], ctx: Context
+) -> Phone | Messages | Directory | Bridge | Sink:
+    """Instantiate the adapter class for `kind`. The class is trusted to honour
+    the port named by `kind` (core/ports.py); duck typing, not inheritance."""
     name = cfg.get("adapter", "")
     target = ADAPTERS[kind].get(name, name)
     if ":" not in target:
         known = ", ".join(ADAPTERS[kind])
-        raise ValueError(
-            f"unknown {kind} adapter {name!r} (known: {known}, or module:Class)"
-        )
+        raise ValueError(f"unknown {kind} adapter {name!r} (known: {known}, or module:Class)")
     module, cls = target.split(":", 1)
     return getattr(importlib.import_module(module), cls)(ctx, cfg)

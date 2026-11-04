@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import array
 import wave
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ...core.ports import PCM_BYTES_PER_SAMPLE
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 FLUSH_SECONDS = 1.0
 MAX_SKEW_SECONDS = 1.0  # one side went quiet on the pipe: pad it, keep in sync
@@ -27,7 +30,7 @@ class CallTape:
         self._out = bytearray()
         self.frames = 0
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._wav = wave.open(str(path), "wb")
+        self._wav = wave.open(str(path), "wb")  # noqa: SIM115 - lives as long as the tape; close() ends it
         self._wav.setnchannels(2)
         self._wav.setsampwidth(PCM_BYTES_PER_SAMPLE)
         self._wav.setframerate(sample_rate)
@@ -51,11 +54,11 @@ class CallTape:
         self._flush()
         self._wav.close()
 
-    def _mix(self, final: bool = False) -> None:
+    def _mix(self, *, final: bool = False) -> None:
         skew = int(self.rate * MAX_SKEW_SECONDS) * PCM_BYTES_PER_SAMPLE
         for a, b in ((self._heard, self._sent), (self._sent, self._heard)):
             if final or len(a) - len(b) > skew:
-                b += bytes(max(0, len(a) - len(b)))
+                b.extend(bytes(max(0, len(a) - len(b))))  # pads self._heard/_sent in place
         n = min(len(self._heard), len(self._sent)) // PCM_BYTES_PER_SAMPLE
         if not n:
             return

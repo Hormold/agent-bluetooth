@@ -1,3 +1,5 @@
 """Agent Bluetooth: turn any phone into an API + LiveKit room over Bluetooth."""
 
-__version__ = "0.1.0"
+from __future__ import annotations
+
+__version__ = "0.2.0"

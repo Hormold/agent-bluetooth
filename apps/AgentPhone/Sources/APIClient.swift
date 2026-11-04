@@ -1,91 +1,141 @@
 import Foundation
 
-/// Thin client for the Agent Bluetooth daemon HTTP API.
-actor APIClient {
-    var base: URL
-    var key: String
+extension URL {
+    /// A URL from a literal that is known to be valid at compile time.
+    init(literal: StaticString) {
+        guard let url = Self(string: "\(literal)") else { preconditionFailure("invalid URL literal \(literal)") }
+        self = url
+    }
+}
 
-    init(base: URL, key: String = "") {
-        self.base = base
-        self.key = key
+/// Where the daemon and the local LiveKit dev server live when they run on this
+/// Mac (the config LocalServices writes uses the same address and port).
+enum DaemonDefaults {
+    static let baseURL = URL(literal: "http://127.0.0.1:8080")
+    static let liveKitURL = "ws://127.0.0.1:7880"
+    static let liveKitHTTP = "http://127.0.0.1:7880"
+    static let liveKitDevKey = "devkey"
+    static let liveKitDevSecret = "secret"
+
+    /// An address (box or LiveKit) that points at this Mac.
+    static func isOnThisMac(_ address: String) -> Bool {
+        address.contains("127.0.0.1") || address.contains("localhost")
+    }
+}
+
+/// A failed request, with the box's own words when it gave any
+/// (`{"error": "..."}` on a non-2xx answer).
+enum APIError: LocalizedError {
+    case server(status: Int, message: String)
+    case notHTTP
+
+    var errorDescription: String? {
+        switch self {
+        case .server(_, let message): message
+        case .notHTTP: "The box sent something that isn't an HTTP answer."
+        }
+    }
+}
+
+/// Thin client for the Agent Bluetooth daemon HTTP API. A value: CallCenter
+/// swaps in a new one when the address or key changes.
+struct APIClient: Sendable {
+    /// Every endpoint the app calls (daemon api/http.py).
+    enum Path {
+        static let status = "api/status"
+        static let events = "api/events"
+        static let calls = "api/calls"
+        static let hangup = "api/calls/hangup"
+        static let dtmf = "api/calls/dtmf"
+        static let history = "api/calls/history"
+        static let token = "api/token"
+        static let contacts = "api/contacts"
+        static let directory = "api/directory"
+        static let directorySync = "api/directory/sync"
+        static let debug = "api/debug"
+        static let phones = "api/phones"
+        static let pair = "api/pair"
+        static let forget = "api/phones/forget"
+        static let settings = "api/settings"
     }
 
-    func update(base: URL, key: String) {
-        self.base = base
-        self.key = key
+    private static let quickTimeout: TimeInterval = 15
+    private static let slowTimeout: TimeInterval = 90  // PBAP pulls from the phone are slow and serialized
+
+    let base: URL
+    let key: String
+
+    // MARK: calls
+
+    func status() async throws -> Status { try await send(Path.status, timeout: Self.quickTimeout) }
+    func dial(_ number: String) async throws { try await post(Path.calls, ["number": .string(number)]) }
+    func hangup() async throws { try await post(Path.hangup) }
+    func dtmf(_ digits: String) async throws { try await post(Path.dtmf, ["digits": .string(digits)]) }
+    func token(room: String, identity: String) async throws -> JoinInfo {
+        try await send(Path.token, body: ["room": .string(room), "identity": .string(identity)])
     }
 
-    private func request(_ path: String, method: String = "GET", body: [String: Any]? = nil) -> URLRequest {
-        var r = URLRequest(url: base.appendingPathComponent(path))
-        r.httpMethod = method
-        r.timeoutInterval = 15
-        if !key.isEmpty { r.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+    // MARK: directory, devices, settings
+
+    func contacts() async throws -> [Contact] { try await send(Path.contacts) }
+    func history() async throws -> [HistoryItem] { try await send(Path.history) }
+    func directoryInfo() async throws -> DirectoryInfo { try await send(Path.directory) }
+    func syncDirectory() async throws { try await post(Path.directorySync) }
+    func box() async throws -> BoxInfo { try await send(Path.debug) }
+    func phones() async throws -> [PairedPhone] { try await send(Path.phones) }
+    func pair() async throws { try await post(Path.pair) }
+    func forget(_ address: String) async throws { try await post(Path.forget, ["address": .string(address)]) }
+    func settings() async throws -> AppSettings { try await send(Path.settings) }
+    func saveSettings(_ changes: JSONObject) async throws -> AppSettings {
+        try await send(Path.settings, body: changes)
+    }
+
+    /// The SSE stream. Browsers' EventSource can't set headers, so the key
+    /// rides in the query, which the daemon accepts too.
+    var eventsURL: URL {
+        let url = base.appendingPathComponent(Path.events)
+        guard !key.isEmpty else { return url }
+        return url.appending(queryItems: [URLQueryItem(name: "key", value: key)])
+    }
+
+    // MARK: transport
+
+    /// A POST whose answer only matters for its status.
+    private func post(_ path: String, _ body: JSONObject = [:]) async throws {
+        _ = try await data(path, body: body, timeout: Self.quickTimeout)
+    }
+
+    /// GET (no body) or POST (body), decoded as `T`.
+    private func send<T: Decodable>(
+        _ path: String, body: JSONObject? = nil, timeout: TimeInterval = slowTimeout
+    ) async throws -> T {
+        let payload = try await data(path, body: body, timeout: body == nil ? timeout : Self.quickTimeout)
+        return try JSONDecoder().decode(T.self, from: payload)
+    }
+
+    private func data(_ path: String, body: JSONObject?, timeout: TimeInterval) async throws -> Data {
+        var request = URLRequest(url: base.appendingPathComponent(path))
+        request.timeoutInterval = timeout
+        if !key.isEmpty { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         if let body {
-            r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            r.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(body)
         }
-        return r
-    }
-
-    func status() async throws -> Status {
-        let (data, _) = try await URLSession.shared.data(for: request("api/status"))
-        return try JSONDecoder().decode(Status.self, from: data)
-    }
-
-    @discardableResult
-    func post(_ path: String, _ body: [String: Any] = [:]) async throws -> Data {
-        let (data, resp) = try await URLSession.shared.data(for: request(path, method: "POST", body: body))
-        if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
-            throw NSError(domain: "AgentPhone", code: http.statusCode,
-                          userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"])
-        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.notHTTP }
+        if let failure = Self.failure(status: http.statusCode, data: data) { throw failure }
         return data
     }
 
-    func dial(_ number: String) async throws { try await post("api/calls", ["number": number]) }
-    func answer(callId: String?) async throws { try await post("api/calls/bridge", callId.map { ["call_id": $0] } ?? [:]) }
-    func hangup() async throws { try await post("api/calls/hangup") }
-    func dtmf(_ digits: String) async throws { try await post("api/calls/dtmf", ["digits": digits]) }
-    func sendSMS(to: String, text: String) async throws { try await post("api/sms", ["to": to, "text": text]) }
-
-    struct JoinInfo: Decodable { let url: String; let room: String; let token: String }
-    func token(room: String, identity: String) async throws -> JoinInfo {
-        let data = try await post("api/token", ["room": room, "identity": identity])
-        return try JSONDecoder().decode(JoinInfo.self, from: data)
-    }
-
-    private func get<T: Decodable>(_ path: String, _ type: T.Type) async throws -> T {
-        var req = request(path)
-        req.timeoutInterval = 90  // PBAP pulls from the phone are slow and serialized
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
-            throw NSError(domain: "AgentPhone", code: http.statusCode,
-                          userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"])
-        }
-        return try JSONDecoder().decode(T.self, from: data)
-    }
-
-    func contacts() async throws -> [Contact] { try await get("api/contacts", [Contact].self) }
-    func history() async throws -> [HistoryItem] { try await get("api/calls/history", [HistoryItem].self) }
-    func phones() async throws -> [PairedPhone] { try await get("api/phones", [PairedPhone].self) }
-    func settings() async throws -> AppSettings { try await get("api/settings", AppSettings.self) }
-
-    func directoryInfo() async throws -> DirectoryInfo { try await get("api/directory", DirectoryInfo.self) }
-    func syncDirectory() async throws { try await post("api/directory/sync") }
-    func box() async throws -> BoxInfo { try await get("api/debug", BoxInfo.self) }
-
-    func pair() async throws { try await post("api/pair") }
-    func forget(_ address: String) async throws { try await post("api/phones/forget", ["address": address]) }
-
-    @discardableResult
-    func saveSettings(_ body: [String: Any]) async throws -> AppSettings {
-        let data = try await post("api/settings", body)
-        return try JSONDecoder().decode(AppSettings.self, from: data)
-    }
-
-    var eventsURL: URL {
-        var c = URLComponents(url: base.appendingPathComponent("api/events"), resolvingAgainstBaseURL: false)!
-        if !key.isEmpty { c.queryItems = [URLQueryItem(name: "key", value: key)] }
-        return c.url!
+    /// Non-2xx, or a 2xx that still says `"ok": false`, as an error carrying the
+    /// box's message.
+    private static func failure(status: Int, data: Data) -> APIError? {
+        let object = try? JSONDecoder().decode(JSONObject.self, from: data)  // non-JSON bodies are fine here
+        let failed = !(200..<300).contains(status) || object?["ok"]?.boolValue == false
+        guard failed else { return nil }
+        let text = String(bytes: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let message = object?["error"]?.stringValue ?? (text.isEmpty ? "HTTP \(status)" : text)
+        return .server(status: status, message: message)
     }
 }

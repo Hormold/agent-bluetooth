@@ -1,0 +1,53 @@
+; Architecture contracts (AGENTS.md). Checked by scripts/check.sh.
+[importlinter]
+root_package = agent_bluetooth
+
+[importlinter:contract:core-is-inner]
+name = core imports no adapters, api, cli or wiring
+type = forbidden
+source_modules =
+    agent_bluetooth.core
+forbidden_modules =
+    agent_bluetooth.adapters
+    agent_bluetooth.api
+    agent_bluetooth.app
+    agent_bluetooth.cli
+    agent_bluetooth.registry
+    agent_bluetooth.farm
+allow_indirect_imports = true
+
+[importlinter:contract:adapters-are-leaves]
+name = adapters reach core only, never api, cli or wiring
+type = forbidden
+source_modules =
+    agent_bluetooth.adapters
+forbidden_modules =
+    agent_bluetooth.api
+    agent_bluetooth.app
+    agent_bluetooth.cli
+    agent_bluetooth.registry
+    agent_bluetooth.farm
+
+; Adapter families never import each other. adapters.bumble is the one
+; exception: the shared Bluetooth radio/transport that phone, messages and
+; directory all ride on, so it is left out of this list.
+[importlinter:contract:families-independent]
+name = adapter families are independent
+type = independence
+modules =
+    agent_bluetooth.adapters.phone
+    agent_bluetooth.adapters.messages
+    agent_bluetooth.adapters.directory
+    agent_bluetooth.adapters.bridge
+    agent_bluetooth.adapters.audio
+    agent_bluetooth.adapters.sinks
+
+[importlinter:contract:radio-knows-no-profiles]
+name = the shared radio does not know the profiles on top of it
+type = forbidden
+source_modules =
+    agent_bluetooth.adapters.bumble
+forbidden_modules =
+    agent_bluetooth.adapters.phone
+    agent_bluetooth.adapters.messages
+    agent_bluetooth.adapters.directory

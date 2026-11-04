@@ -13,12 +13,17 @@ import asyncio
 import logging
 import math
 import random
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from ...core.bus import EventBus
 from ...core.events import E
-from ...core.ports import PCM_BYTES_PER_SAMPLE, AudioPipe, Call
+from ...core.ports import PCM_BYTES_PER_SAMPLE
+from ...core.settings import phrases_in
+from ...core.tasks import Tasks
 from .file_player import FRAME_MS, _load_wav
+
+if TYPE_CHECKING:
+    from ...core.bus import EventBus
+    from ...core.ports import AudioPipe, Call
 
 log = logging.getLogger(__name__)
 SPEECH_RMS = 400  # caller speaking (16-bit PCM, phone line)
@@ -27,16 +32,16 @@ NO_REPLY_S = 6.0  # nobody spoke: say the next line anyway
 MAX_TURN_S = 12.0  # don't wait forever for a monologue to end
 
 
-def phrases_in(folder: str) -> list[Path]:
-    return sorted(p for p in Path(folder).expanduser().glob("*.wav") if p.is_file())
-
-
 class StallPlayer:
-    def __init__(self, bus: EventBus, folder: str, max_minutes: float = 5) -> None:
+    def __init__(
+        self, bus: EventBus, folder: str, max_minutes: float = 5, *, tag: str = ""
+    ) -> None:
         self.bus = bus
         self.folder = folder
+        self.tag = tag  # echoed in PLAYBACK_DONE as `handler`
         self.max_seconds = max_minutes * 60
-        self._task: asyncio.Task | None = None
+        self._tasks = Tasks(f"stall:{tag or folder}")
+        self._task: asyncio.Task[None] | None = None
 
     async def attach_audio(self, call: Call, audio: AudioPipe) -> None:
         if self._task and not self._task.done():
@@ -44,14 +49,16 @@ class StallPlayer:
         clips = [_load_wav(str(p), audio.sample_rate) for p in phrases_in(self.folder)]
         if not clips:
             log.warning("stall: no .wav phrases in %s; hanging up", self.folder)
-            self.bus.publish(E.PLAYBACK_DONE, call_id=call.id, file=self.folder)
+            self.bus.publish(E.PLAYBACK_DONE, call_id=call.id, file=self.folder, handler=self.tag)
             return
-        self._task = asyncio.create_task(self._run(call, audio, clips))
+        self._task = self._tasks.spawn(self._run(call, audio, clips), name=f"stall:{call.id}")
 
     async def close(self, call: Call) -> None:
         if self._task:
-            self._task.cancel()
+            log.debug("stopping stall on call %s", call.id)
             self._task = None
+        # Wait it out: once close() returns, nothing more reaches the line.
+        await self._tasks.aclose()
 
     async def _run(self, call: Call, audio: AudioPipe, clips: list[bytes]) -> None:
         loop = asyncio.get_running_loop()
@@ -65,13 +72,13 @@ class StallPlayer:
             self.max_seconds,
         )
         while loop.time() < end:
-            i = random.choice([n for n in range(len(clips)) if n != last] or [0])
+            i = random.choice([n for n in range(len(clips)) if n != last] or [0])  # noqa: S311 - picks a phrase, not a secret
             last = i
             await self._say(audio, clips[i])
             await self._listen(audio, min(end, loop.time() + MAX_TURN_S))
             turns += 1
         log.info("stall done on %s after %d phrases", call.id, turns)
-        self.bus.publish(E.PLAYBACK_DONE, call_id=call.id, file=self.folder)
+        self.bus.publish(E.PLAYBACK_DONE, call_id=call.id, file=self.folder, handler=self.tag)
 
     @staticmethod
     async def _say(audio: AudioPipe, pcm: bytes) -> None:

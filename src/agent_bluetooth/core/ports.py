@@ -2,8 +2,14 @@
 
     Phone    -> talks to the handset (calls + call audio).   e.g. bumble-hfp, fake
     Messages -> SMS in/out.                                   e.g. bumble-map, fake
+    Directory-> contacts + call history from the handset.     e.g. bumble-pbap, fake
     Bridge   -> where call audio goes.                        e.g. livekit
+    AudioKit -> WAV playback, stall phrases, call recording.  e.g. wav
     Sink     -> where notifications go.                       e.g. telegram, webhook, log
+
+SettingsHost / ActionHost: the slice of the wired app (app.py) that settings and
+automation actions reach into. App satisfies them structurally; core never
+imports the wiring layer.
 
 Adapters only talk to each other through the EventBus and AudioPipe.
 """
@@ -15,9 +21,13 @@ import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from .events import Event
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from .events import Event
+    from .router import CallRouter
 
 PCM_BYTES_PER_SAMPLE = 2  # all audio is 16-bit signed little-endian mono
 
@@ -45,9 +55,7 @@ class AudioPipe:
     side just reads and writes. Buffers are bounded so latency never grows.
     """
 
-    def __init__(
-        self, sample_rate: int, max_buffer_ms: int = 400, tx_prime_ms: int = 140
-    ) -> None:
+    def __init__(self, sample_rate: int, max_buffer_ms: int = 400, tx_prime_ms: int = 140) -> None:
         self.sample_rate = sample_rate
         self._max_bytes = sample_rate * PCM_BYTES_PER_SAMPLE * max_buffer_ms // 1000
         # The phone pulls outgoing audio in USB-sized bursts (~128 ms at once)
@@ -154,6 +162,16 @@ class AudioTap(Protocol):
     def sent(self, pcm: bytes) -> None: ...
 
 
+class Recording(AudioTap, Protocol):
+    """One call's recording on disk; the router names the file and closes it."""
+
+    path: Path
+
+    @property
+    def seconds(self) -> float: ...
+    def close(self) -> None: ...
+
+
 @runtime_checkable
 class Component(Protocol):
     async def start(self) -> None: ...
@@ -162,7 +180,9 @@ class Component(Protocol):
 
 @runtime_checkable
 class Phone(Component, Protocol):
-    def status(self) -> dict[str, Any]: ...
+    def status(self) -> dict[str, Any]:
+        """Includes "call": the phone's current call (Call.to_dict()) or None."""
+
     def audio(self) -> AudioPipe | None:
         """Pipe for the live call audio, or None when no audio link is up."""
 
@@ -180,6 +200,18 @@ class Messages(Component, Protocol):
 
 
 @runtime_checkable
+class Directory(Component, Protocol):
+    async def contacts(self) -> list[dict[str, Any]]: ...
+    async def history(self) -> list[dict[str, Any]]: ...
+    def lookup(self, number: str) -> str | None:
+        """Contact name for a number, or None when it isn't a contact."""
+
+    def info(self) -> dict[str, Any]: ...
+    def sync(self) -> None:
+        """Start a background refresh from the phone."""
+
+
+@runtime_checkable
 class AudioHandler(Protocol):
     """Something that consumes/produces a live call's audio: a LiveKit room, a
     WAV player, stall phrases. The router attaches exactly one per call."""
@@ -188,11 +220,26 @@ class AudioHandler(Protocol):
     async def close(self, call: Call) -> None: ...
 
 
+class AudioKit(Protocol):
+    """Builds the call audio handlers that are not a room (wired in app.py).
+
+    `tag` names this one handler: completion events (PLAYBACK_DONE) carry it as
+    `handler`, so the router can ignore a handler it already replaced."""
+
+    def player(
+        self, path: str, *, tag: str, loop: bool = False, hangup_after: bool = True
+    ) -> AudioHandler: ...
+    def stall(self, folder: str, max_minutes: float, *, tag: str) -> AudioHandler: ...
+    def tape(self, path: Path, sample_rate: int) -> Recording: ...
+
+
 @runtime_checkable
-class Bridge(AudioHandler, Protocol):
-    async def open(self, call: Call) -> dict[str, Any]:
+class Bridge(Component, AudioHandler, Protocol):
+    async def open(self, call: Call, *, agent_name: str = "") -> dict[str, Any]:
         """Create the room for a call (before it is answered), or join call.room
-        when set. Returns room info.
+        when set; dispatch `agent_name` into it ("" = none). Returns room info.
+        Raises RuntimeError (or OSError) when the room can't be opened, and
+        leaves nothing of it behind, so open can be retried.
         Must publish ROOM_JOINED / ROOM_LEFT with call_id and `others` count."""
 
     def join_info(self, room: str, identity: str) -> dict[str, Any]:
@@ -208,4 +255,27 @@ class Sink(Protocol):
 class Simulator(Protocol):
     """Optional: adapters that can fake inbound traffic (dev/demo)."""
 
-    async def simulate(self, kind: str, **params: Any) -> None: ...
+    async def simulate(self, kind: str, **params: object) -> None: ...
+
+
+class _RoutedHost(Protocol):
+    @property
+    def config(self) -> dict[str, Any]: ...
+    @property
+    def router(self) -> CallRouter: ...
+
+
+class SettingsHost(_RoutedHost, Protocol):
+    """What core/settings.py reads and changes: the router and the bridge."""
+
+    @property
+    def bridge(self) -> Bridge: ...
+
+
+class ActionHost(_RoutedHost, Protocol):
+    """What automation actions (core/actions.py) drive."""
+
+    @property
+    def phone(self) -> Phone: ...
+    @property
+    def messages(self) -> Messages | None: ...

@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import logging
 from html import escape
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import aiohttp
+from ...core.events import E
+from ._http import post_json
 
-from ...core.context import Context
-from ...core.events import E, Event
-
-log = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from ...core.context import Context
+    from ...core.events import Event
 
 
 def _who(d: dict[str, Any]) -> str:
@@ -57,7 +56,4 @@ class TelegramSink:
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
-        async with aiohttp.ClientSession() as http:
-            async with http.post(url, json=payload) as r:
-                if r.status >= 400:
-                    log.warning("telegram %s %s", r.status, await r.text())
+        await post_json(url, payload, what="telegram sendMessage")
