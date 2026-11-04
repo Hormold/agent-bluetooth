@@ -6,8 +6,8 @@ import UserNotifications
 /// it goes away by itself once the call is answered, declined or ends anywhere.
 @MainActor
 final class IncomingCallAlert: NSObject, UNUserNotificationCenterDelegate {
-    var onAnswer: () -> Void = {}
-    var onDecline: () -> Void = {}
+    var onAnswer: (() -> Void)?
+    var onDecline: (() -> Void)?
 
     private let center = UNUserNotificationCenter.current()
     private var ringingID: String?
@@ -29,14 +29,17 @@ final class IncomingCallAlert: NSObject, UNUserNotificationCenterDelegate {
                     UNNotificationAction(identifier: Self.decline, title: "Decline", options: [.destructive]),
                 ],
                 intentIdentifiers: []
-            ),
+            )
         ])
-        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        center.requestAuthorization(options: [.alert, .sound]) { _, error in
+            // Denied is fine (the setup checklist offers System Settings); a failure is worth a log line.
+            if let error { Log.calls.error("notification permission: \(error.localizedDescription, privacy: .public)") }
+        }
     }
 
     /// Call on every change of the current call.
     func update(_ call: Call?) {
-        let ringing = call.map { $0.incoming && $0.state == "ringing" } ?? false
+        let ringing = call.map { $0.incoming && $0.state == CallState.ringing } ?? false
         if ringing, let call, ringingID != call.id {
             start(call)
         } else if !ringing, ringingID != nil {
@@ -52,7 +55,10 @@ final class IncomingCallAlert: NSObject, UNUserNotificationCenterDelegate {
         content.body = call.display
         content.categoryIdentifier = Self.category
         content.interruptionLevel = .timeSensitive
-        center.add(UNNotificationRequest(identifier: call.id, content: content, trigger: nil))
+        center.add(UNNotificationRequest(identifier: call.id, content: content, trigger: nil)) { error in
+            // The ringtone and Dock bounce still run; only the banner is missing.
+            if let error { Log.calls.error("call notification: \(error.localizedDescription, privacy: .public)") }
+        }
 
         // Ring until it's handled. A system sound keeps the bundle asset-free.
         let sound = NSSound(named: "Submarine")
@@ -65,7 +71,7 @@ final class IncomingCallAlert: NSObject, UNUserNotificationCenterDelegate {
     private func stop() {
         ringtone?.stop()
         ringtone = nil
-        if let a = attention { NSApp.cancelUserAttentionRequest(a) }
+        if let attention { NSApp.cancelUserAttentionRequest(attention) }
         attention = nil
         if let id = ringingID {
             center.removeDeliveredNotifications(withIdentifiers: [id])
@@ -76,22 +82,24 @@ final class IncomingCallAlert: NSObject, UNUserNotificationCenterDelegate {
 
     // MARK: UNUserNotificationCenterDelegate
 
+    // swiftlint:disable async_without_await - the delegate's async requirement; nothing to wait for
     nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter, willPresent notification: UNNotification
+        _: UNUserNotificationCenter, willPresent _: UNNotification
     ) async -> UNNotificationPresentationOptions {
         [.banner, .list]  // show even while the app is in front
     }
+    // swiftlint:enable async_without_await
 
     nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
+        _: UNUserNotificationCenter, didReceive response: UNNotificationResponse
     ) async {
         let action = response.actionIdentifier
         await MainActor.run {
             switch action {
             case Self.answer:
-                onAnswer()
+                onAnswer?()
             case Self.decline:
-                onDecline()
+                onDecline?()
             default:  // tapped the banner itself: bring the call screen up
                 NSApp.activate()
             }

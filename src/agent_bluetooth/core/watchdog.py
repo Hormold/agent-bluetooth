@@ -18,6 +18,8 @@ import asyncio
 import logging
 import os
 import socket
+from pathlib import Path
+from typing import Any, NoReturn
 
 log = logging.getLogger(__name__)
 
@@ -31,10 +33,11 @@ def sd_notify(state: str) -> bool:
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
             s.sendto(state.encode(), addr)
-        return True
     except OSError:
         log.debug("sd_notify failed", exc_info=True)
         return False
+    else:
+        return True
 
 
 def watchdog_interval() -> float:
@@ -51,3 +54,22 @@ async def heartbeat() -> None:
     while True:
         await asyncio.sleep(interval)
         sd_notify("WATCHDOG=1")
+
+
+def write_pidfile(config: dict[str, Any]) -> Path:
+    """<state_dir>/daemon.pid: lets recovery tooling stop THIS instance's leftover
+    process without touching its siblings on the same machine."""
+    path = Path(config["instance"]["state_dir"]).expanduser() / "daemon.pid"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{os.getpid()}\n")
+    return path
+
+
+def fatal(code: int, reason: str) -> NoReturn:
+    """Exit hard so the supervisor (systemd, `farm`) restarts us with fresh USB
+    handles. os._exit skips cleanup on purpose: a wedged libusb close would hang."""
+    log.critical("%s; exiting (%d) for a clean restart", reason, code)
+    sd_notify(f"STATUS={reason}")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    os._exit(code)

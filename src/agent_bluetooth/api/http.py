@@ -2,38 +2,60 @@
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import json
 import logging
 import time
+import uuid
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from aiohttp import web
 
-from ..core.events import E, Event
+from ..core.actions import as_bool
+from ..core.errors import PhoneCommandError
+from ..core.events import E
 from ..core.ports import Simulator
 from ..core.settings import apply as settings_apply
 from ..core.settings import current as settings_current
 from ..core.settings import validate as settings_validate
+from ..core.tasks import Tasks
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from aiohttp.typedefs import Handler
+
     from ..app import App
+    from ..core.events import Event
+    from ..core.ports import Call, Directory, Phone
+
+    PhoneCommand = Callable[[Phone, dict[str, Any]], Awaitable[None]]
 
 log = logging.getLogger(__name__)
 WEB = Path(__file__).parent / "web"
+SMS_KEPT = 1000  # newest SMS events kept for GET /api/sms; also its max limit
+SMS_DEFAULT_LIMIT = "20"
+STATUS_RECENT_EVENTS = 50
+PAIR_DEFAULT_S = 120
+
+
+@runtime_checkable
+class _Simulating(Simulator, Protocol):
+    simulates: frozenset[str]  # the `kind`s this adapter can fake
 
 
 class HttpApi:
     def __init__(self, app: App, cfg: dict[str, Any]) -> None:
         self.app = app
-        self.host = cfg.get("host", "0.0.0.0")
+        self.host = cfg.get("host", "127.0.0.1")  # exposing the phone is opt-in
         self.port = int(cfg.get("port", 8080))
         self.api_key = cfg.get("api_key", "")
         self._runner: web.AppRunner | None = None
+        self._tasks = Tasks(f"{app.name}:http")  # dials that outlive their request
         self.started_at = time.time()
-        self.sms: deque[Event] = deque(maxlen=1000)
+        self.sms: deque[Event] = deque(maxlen=SMS_KEPT)
         self.app.ctx.bus.subscribe(self._capture_sms)
         self.logs = _RingLog()
         logging.getLogger().addHandler(self.logs)
@@ -41,7 +63,7 @@ class HttpApi:
     async def start(self) -> None:
         server = web.Application(middlewares=[self._auth])
         r = server.router
-        r.add_get("/", lambda _: web.FileResponse(WEB / "index.html"))
+        r.add_get("/", self.index)
         r.add_get("/api/status", self.status)
         r.add_get("/api/events", self.events)
         r.add_post("/api/calls", self.dial)
@@ -73,9 +95,10 @@ class HttpApi:
     async def stop(self) -> None:
         if self._runner:
             await self._runner.cleanup()
+        await self._tasks.aclose()
 
     @web.middleware
-    async def _auth(self, request: web.Request, handler):
+    async def _auth(self, request: web.Request, handler: Handler) -> web.StreamResponse:
         if self.api_key and request.path.startswith("/api/"):
             given = request.headers.get("Authorization", "").removeprefix("Bearer ")
             if (given or request.query.get("key")) != self.api_key:
@@ -86,12 +109,20 @@ class HttpApi:
             return web.json_response({"error": str(e)}, status=400)
         except web.HTTPException as e:
             return web.json_response({"error": e.text}, status=e.status)
+        except PhoneCommandError as e:
+            # The phone was there and got the command but didn't do it: an
+            # upstream failure (502), or no reply in time (504).
+            status = 504 if e.reason == "timeout" else 502
+            return web.json_response(e.as_dict(), status=status)
         except RuntimeError as e:
             # Adapters raise RuntimeError for "not right now" (phone not connected):
             # that's a 503 the client can show, not a server crash.
             return web.json_response({"error": str(e)}, status=503)
 
     # handlers --------------------------------------------------------------
+    async def index(self, _: web.Request) -> web.FileResponse:
+        return web.FileResponse(WEB / "index.html")
+
     async def status(self, _: web.Request) -> web.Response:
         router = self.app.router
         calls = [
@@ -104,7 +135,7 @@ class HttpApi:
                 "messages": self.app.config.get("messages", {}).get("adapter", "none"),
                 "calls": calls,
                 "simulate": sorted(k for c in self._simulators() for k in c.simulates),
-                "recent": [e.to_dict() for e in self.app.ctx.bus.history][-50:],
+                "recent": [e.to_dict() for e in self.app.ctx.bus.history][-STATUS_RECENT_EVENTS:],
             }
         )
 
@@ -124,23 +155,39 @@ class HttpApi:
 
     async def dial(self, request: web.Request) -> web.Response:
         body = await request.json()
+        number = body["number"]
         if not self.app.phone.status().get("connected"):
             raise web.HTTPServiceUnavailable(text="phone not connected")
-        asyncio.create_task(
-            self.app.router.dial(
-                body["number"],
+        # ATD can take seconds, so the dial runs on; its outcome arrives as an
+        # event: call.dialing on success, call.failed with this request_id if not.
+        request_id = uuid.uuid4().hex[:12]
+        self._tasks.spawn(self._dial(request_id, number, body), name=f"http-dial:{request_id}")
+        return web.json_response({"ok": True, "request_id": request_id})
+
+    async def _dial(self, request_id: str, number: str, body: dict[str, Any]) -> None:
+        try:
+            await self.app.router.dial(
+                number,
                 room=body.get("room", ""),
                 agent_name=body.get("agent_name", ""),
                 task=body.get("task", ""),
             )
-        )
-        return web.json_response({"ok": True})
+        except RuntimeError as e:  # PhoneCommandError, or the phone dropped meanwhile
+            failure = (
+                e.as_dict()
+                if isinstance(e, PhoneCommandError)
+                else {"error": str(e), "command": "dial", "reason": "unavailable"}
+            )
+            self.app.ctx.bus.publish(E.CALL_FAILED, request_id=request_id, number=number, **failure)
 
     async def play(self, request: web.Request) -> web.Response:
         body = await request.json()
         call = self._active_call(body.get("call_id"))
         await self.app.router.play_file(
-            call, body["file"], body.get("loop", False), body.get("hangup_after", True)
+            call,
+            body["file"],
+            loop=as_bool(body.get("loop")),
+            hangup_after=as_bool(body.get("hangup_after"), default=True),
         )
         return web.json_response({"ok": True, "call_id": call.id})
 
@@ -162,12 +209,12 @@ class HttpApi:
             self.sms.appendleft(event)
 
     async def list_sms(self, request: web.Request) -> web.Response:
-        limit = int(request.query.get("limit", "20"))
-        if not 1 <= limit <= 1000:
-            raise ValueError("limit must be between 1 and 1000")
+        limit = int(request.query.get("limit", SMS_DEFAULT_LIMIT))
+        if not 1 <= limit <= SMS_KEPT:
+            raise ValueError(f"limit must be between 1 and {SMS_KEPT}")
         return web.json_response([e.to_dict() for e in list(self.sms)[:limit]])
 
-    def _directory(self):
+    def _directory(self) -> Directory:
         if self.app.directory is None:
             raise web.HTTPNotImplemented(text="no directory adapter configured")
         return self.app.directory
@@ -217,8 +264,8 @@ class HttpApi:
         if fn is None:
             raise web.HTTPNotImplemented(text="this phone adapter has no pairing")
         body = await request.json() if request.can_read_body else {}
-        await fn(float(body.get("seconds", 120)))
-        return web.json_response({"ok": True, "discoverable": True})
+        window = await fn(float(body.get("seconds", PAIR_DEFAULT_S)))
+        return web.json_response({"ok": True, "discoverable": True, **(window or {})})
 
     async def forget_phone(self, request: web.Request) -> web.Response:
         fn = getattr(self.app.phone, "forget", None)
@@ -255,7 +302,7 @@ class HttpApi:
         raise web.HTTPNotFound(text=f"no adapter simulates {kind!r}")
 
     # helpers ---------------------------------------------------------------
-    def _active_call(self, call_id: str | None):
+    def _active_call(self, call_id: str | None) -> Call:
         calls = self.app.router.calls
         if call_id:
             if call_id not in calls:
@@ -265,14 +312,10 @@ class HttpApi:
             raise web.HTTPConflict(text=f"{len(calls)} active calls; pass call_id")
         return next(iter(calls.values()))
 
-    def _simulators(self) -> list[Any]:
-        return [
-            c
-            for c in self.app.components()
-            if isinstance(c, Simulator) and hasattr(c, "simulates")
-        ]
+    def _simulators(self) -> list[_Simulating]:
+        return [c for c in self.app.components() if isinstance(c, _Simulating)]
 
-    def _cmd(self, fn):
+    def _cmd(self, fn: PhoneCommand) -> Handler:
         async def handler(request: web.Request) -> web.Response:
             body = await request.json() if request.can_read_body else {}
             await fn(self.app.phone, body)
@@ -288,14 +331,10 @@ class _RingLog(logging.Handler):
     def __init__(self, size: int = 500) -> None:
         super().__init__(logging.INFO)
         self.lines: deque[str] = deque(maxlen=size)
-        self.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname).1s %(name)s: %(message)s")
-        )
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname).1s %(name)s: %(message)s"))
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.name == "aiohttp.access":
             return
-        try:
+        with contextlib.suppress(Exception):
             self.lines.append(self.format(record))
-        except Exception:
-            pass

@@ -2,31 +2,31 @@
 
 from __future__ import annotations
 
-import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
-from ...core.context import Context
-from ...core.events import Event
+from ._http import DEFAULT_TIMEOUT_S, http_url, post_json
 
-log = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from ...core.context import Context
+    from ...core.events import Event
 
 
 class WebhookSink:
     def __init__(self, ctx: Context, cfg: dict[str, Any]) -> None:
-        self.url: str = cfg["url"]
+        self.url: str = http_url(cfg["url"], "webhook sink")
         self.events: set[str] = set(cfg.get("events", []))  # empty = all
         self.headers: dict[str, str] = cfg.get("headers", {})
+        self.limit = aiohttp.ClientTimeout(total=float(cfg.get("timeout", DEFAULT_TIMEOUT_S)))
 
     async def handle(self, event: Event) -> None:
         if self.events and event.type not in self.events:
             return
-        async with aiohttp.ClientSession() as http:
-            async with http.post(
-                self.url, json=event.to_dict(), headers=self.headers
-            ) as r:
-                if r.status >= 400:
-                    log.warning(
-                        "webhook %s -> %s %s", self.url, r.status, await r.text()
-                    )
+        await post_json(
+            self.url,
+            event.to_dict(),
+            what=f"webhook {self.url}",
+            headers=self.headers,
+            limit=self.limit,
+        )

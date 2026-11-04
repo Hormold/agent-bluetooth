@@ -14,13 +14,20 @@ enum DebugSnapshot {
 
     @MainActor private static func write(to path: String) {
         let visible = NSApp.windows.filter { $0.isVisible && $0.contentView != nil && $0.frame.width > 200 }
-        let main = visible.filter { $0.styleMask.contains(.titled) }.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+        let main = visible.filter { $0.styleMask.contains(.titled) }.max { lhs, rhs in
+            lhs.frame.width * lhs.frame.height < rhs.frame.width * rhs.frame.height
+        }
         // A sheet, when open, is what the screenshot is for.
-        guard let window = visible.first(where: { $0.isSheet }) ?? main ?? visible.first,
-              let view = window.contentView?.superview ?? window.contentView else { return }
+        guard let window = visible.first(where: \.isSheet) ?? main ?? visible.first,
+            let view = window.contentView?.superview ?? window.contentView
+        else { return }
         guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: rep)
-        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        do {
+            try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        } catch {
+            Log.storage.error("snapshot \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 }
 #endif
@@ -65,7 +72,12 @@ enum DemoMode {
     static var directory: DirectorySnapshot? {
         #if DEBUG
         guard let json = ProcessInfo.processInfo.environment["AGENTPHONE_DEMO_JSON"] else { return nil }
-        return try? JSONDecoder().decode(DirectorySnapshot.self, from: Data(json.utf8))
+        do {
+            return try JSONDecoder().decode(DirectorySnapshot.self, from: Data(json.utf8))
+        } catch {
+            Log.storage.error("AGENTPHONE_DEMO_JSON: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
         #else
         nil
         #endif

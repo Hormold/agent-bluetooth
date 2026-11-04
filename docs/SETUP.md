@@ -142,6 +142,8 @@ WantedBy=multi-user.target
 
 `systemctl daemon-reload && systemctl enable --now agent-bluetooth`
 
+Several phones: `deploy/agent-bluetooth@.service`, one unit per instance; see [FARM.md](FARM.md).
+
 `deploy/recover-usb.sh` is an optional `ExecStartPre` for boards whose USB
 controller can be reset from sysfs (it power-cycles the dongle's OHCI
 controller before each start). It's board-specific: read it before using it.

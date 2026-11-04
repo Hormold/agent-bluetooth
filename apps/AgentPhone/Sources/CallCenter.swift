@@ -6,32 +6,39 @@ import SwiftUI
 /// (answer = join the call's LiveKit room; the daemon picks up on join).
 @MainActor
 final class CallCenter: ObservableObject {
-    @Published var phone = Phone(connected: false, peer: nil, call: nil, indicators: nil)
+    private static let pollInterval = Duration.seconds(5)
+    private static let activityLimit = 200
+    private static let macIdentity = "mac"
+
+    @Published var phone = Phone(connected: false)
     @Published var call: Call? {
         didSet { alert.update(call) }  // ring + notify for incoming calls
     }
-    @Published var recents: [RecentCall] = []
     @Published var contacts: [Contact] = [] {
-        didSet { contactIndexCount = -1 }  // names/numbers may change without the count changing
+        didSet { contactIndex = nil }  // names/numbers may change without the count changing
     }
     @Published var history: [HistoryItem] = []
     @Published var directory: DirectoryInfo?
     @Published var box: BoxInfo?
     @Published var activity: [Event] = []
     @Published var phones: [PairedPhone] = []
-    @Published var phonesLoaded = false
-    private var contactIndex: [String: String] = [:]
-    private var contactIndexCount = -1  // don't claim "pair your phone" before we know
+    @Published var phonesLoaded = false  // don't claim "pair your phone" before we know
     @Published var settings: AppSettings?
     @Published var daemonOnline = false
     @Published var error: String?
     @Published var settingsOpen = false  // the Settings sheet; also opened with ⌘,
 
     @Published var host: String {
-        didSet { savePrefs(); reconnect() }
+        didSet {
+            savePrefs()
+            reconnect()
+        }
     }
     @Published var apiKey: String {
-        didSet { savePrefs(); reconnect() }
+        didSet {
+            savePrefs()
+            reconnect()
+        }
     }
 
     let live = LiveKitRoom()
@@ -39,60 +46,68 @@ final class CallCenter: ObservableObject {
     private let alert = IncomingCallAlert()
     private var api: APIClient
     private var stream: EventStream?
-    private var poll: Timer?
+    private var poll: Task<Void, Never>?
+    private var contactIndex: PhoneBookIndex?
 
     init() {
         var prefs = AppPrefs.load()
         #if DEBUG
         if let demoHost = DemoMode.host { prefs.host = demoHost }  // screenshots: never saved
         #endif
-        let h = prefs.host, k = prefs.key
-        host = h; apiKey = k
-        api = APIClient(base: URL(string: h) ?? URL(string: "http://127.0.0.1:8080")!, key: k)
+        host = prefs.host
+        apiKey = prefs.key
+        api = APIClient(base: URL(string: prefs.host) ?? DaemonDefaults.baseURL, key: prefs.key)
         // Ask for the mic up front so the first call can publish audio without a
         // mid-call permission stall.
-        AVCaptureDevice.requestAccess(for: .audio) { _ in }
-        if let snap = DemoMode.directory ?? DirectorySnapshot.load() { contacts = snap.contacts; history = snap.history }
+        AVCaptureDevice.requestAccess(for: .audio) { _ in
+            // The answer is read again by the setup checklist.
+        }
+        if let snap = DemoMode.directory ?? DirectorySnapshot.loadFile() {
+            contacts = snap.contacts
+            history = snap.history
+        }
         alert.onAnswer = { [weak self] in self?.answer() }
         alert.onDecline = { [weak self] in self?.hangup() }
-        start()
-    }
-
-    private func start() {
         reconnect()
-        poll = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { await self?.refresh() }
+        poll = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.pollInterval)  // cancellation ends the loop on the next check
+                await self?.refresh()
+            }
         }
     }
 
     private func reconnect() {
         guard let url = URL(string: host) else { return }
-        Task { await api.update(base: url, key: apiKey) }
+        api = APIClient(base: url, key: apiKey)
         stream?.stop()
-        let s = EventStream(url: { [api] in
-            // eventsURL is actor-isolated; snapshot synchronously via a helper.
-            URL(string: "\(self.host)/api/events" + (self.apiKey.isEmpty ? "" : "?key=\(self.apiKey)"))!
-        }, onEvent: { [weak self] ev in self?.handle(ev) },
-           onConnection: { [weak self] ok in self?.daemonOnline = ok })
-        s.start()
-        stream = s
-        _ = api  // silence capture note
+        let events = EventStream(
+            url: api.eventsURL,
+            onEvent: { [weak self] event in self?.handle(event) },
+            onConnection: { [weak self] online in self?.daemonOnline = online })
+        events.start()
+        stream = events
         Task { await refresh() }
     }
 
     private func savePrefs() {
         if DemoMode.host == nil { AppPrefs(host: host, key: apiKey).save() }
     }
+}
 
+// MARK: - Mirroring the box
+
+extension CallCenter {
     func refresh() async {
         do {
-            let st = try await api.status()
-            phone = st.phone
-            // Prefer calls[] — it carries the LiveKit room name; phone.call does not.
-            call = st.calls.first ?? st.phone.call
+            let status = try await api.status()
+            phone = status.phone
+            // Prefer calls[]: it carries the LiveKit room name; phone.call does not.
+            call = status.calls.first ?? status.phone.call
             if !daemonOnline { loadDeviceState() }  // just found the box: learn paired phones
             daemonOnline = true
         } catch {
+            Log.api.info("status: \(error.localizedDescription, privacy: .public)")
             daemonOnline = false
         }
     }
@@ -102,152 +117,185 @@ final class CallCenter: ObservableObject {
     func loadDirectory() {
         // The box serves its last sync instantly; we keep a local copy too so a
         // relaunch shows the list before the network answers.
+        let client = api
         Task {
-            async let c = try? api.contacts()
-            async let h = try? api.history()
-            async let i = try? api.directoryInfo()
-            let (contacts, history, info) = await (c, h, i)
+            async let contactsReply = Self.quietly("contacts", client.contacts)
+            async let historyReply = Self.quietly("history", client.history)
+            async let infoReply = Self.quietly("directory", client.directoryInfo)
+            let (newContacts, newHistory, info) = await (contactsReply, historyReply, infoReply)
             if DemoMode.directory == nil {  // demo screenshots keep their fake phonebook
-                if let contacts { self.contacts = contacts }
-                if let history { self.history = history }
+                if let newContacts { contacts = newContacts }
+                if let newHistory { history = newHistory }
+                if newContacts != nil || newHistory != nil {
+                    let snapshot = DirectorySnapshot(contacts: contacts, history: history)
+                    Task.detached(priority: .utility) { snapshot.save() }  // thousands of contacts: off the main thread
+                }
             }
             if let info { directory = info }
-            if (contacts != nil || history != nil) && DemoMode.directory == nil {
-                DirectorySnapshot(contacts: self.contacts, history: self.history).save()
-            }
         }
     }
 
     /// Name from the phonebook for a number (matched on the last 10 digits).
     func contactName(for number: String) -> String? {
-        let key = String(number.filter(\.isNumber).suffix(10))
-        guard key.count >= 7 else { return nil }
-        if contactIndexCount != contacts.count { rebuildContactIndex() }
-        return contactIndex[key]
-    }
-
-    private func rebuildContactIndex() {
-        var idx: [String: String] = [:]
-        for c in contacts {
-            for n in c.numbers {
-                let k = String(n.filter(\.isNumber).suffix(10))
-                if k.count >= 7, idx[k] == nil { idx[k] = c.name }
-            }
-        }
-        contactIndex = idx
-        contactIndexCount = contacts.count
+        if contactIndex == nil { contactIndex = PhoneBookIndex(contacts) }
+        return contactIndex?.name(for: number)
     }
 
     func syncDirectory() {
+        let client = api
         run {
-            try await self.api.syncDirectory()
-            self.directory = try? await self.api.directoryInfo()
+            try await client.syncDirectory()
+            if let info = await Self.quietly("directory", client.directoryInfo) { self.directory = info }
         }
     }
 
     /// Status tab: box + phone + sync state, and the recent event history.
     func loadStatus() {
+        let client = api
         Task {
-            async let b = try? api.box()
-            async let d = try? api.directoryInfo()
-            async let s = try? api.status()
-            let (box, dir, st) = await (b, d, s)
-            if let box { self.box = box }
-            if let dir { directory = dir }
-            if let st { phone = st.phone; activity = st.recent.reversed() }
+            async let boxReply = Self.quietly("debug", client.box)
+            async let directoryReply = Self.quietly("directory", client.directoryInfo)
+            async let statusReply = Self.quietly("status", client.status)
+            let (newBox, newDirectory, status) = await (boxReply, directoryReply, statusReply)
+            if let newBox { box = newBox }
+            if let newDirectory { directory = newDirectory }
+            if let status {
+                phone = status.phone
+                activity = status.recent.reversed()
+            }
         }
     }
 
     func loadDeviceState() {
-        Task { if let p = try? await api.phones() { phones = p; phonesLoaded = true } }
-        Task { if let s = try? await api.settings() { settings = s } }
+        let client = api
+        Task {
+            if let paired = await Self.quietly("phones", client.phones) {
+                phones = paired
+                phonesLoaded = true
+            }
+        }
+        Task { _ = await fetchSettings() }
     }
 
     /// Fresh settings from the box (nil if unreachable). The settings form
     /// waits for this so it never starts editing from stale or empty values.
     func fetchSettings() async -> AppSettings? {
-        guard let s = try? await api.settings() else { return nil }
-        settings = s
-        return s
+        guard let fresh = await Self.quietly("settings", api.settings) else { return nil }
+        settings = fresh
+        return fresh
     }
 
     /// Point the box at the LiveKit dev server on this Mac.
     func useLocalLiveKit() {
-        let local = "ws://127.0.0.1:7880"
-        saveSettings(["livekit": ["url": local, "client_url": local, "api_key": "devkey", "api_secret": "secret"]])
+        useLiveKit(
+            url: DaemonDefaults.liveKitURL, key: DaemonDefaults.liveKitDevKey, secret: DaemonDefaults.liveKitDevSecret)
     }
 
     /// Point the box at a LiveKit Cloud project (needed for hosted voice agents).
     func useCloudLiveKit(url: String, key: String, secret: String) {
-        saveSettings(["livekit": ["url": url, "client_url": url, "api_key": key, "api_secret": secret]])
+        useLiveKit(url: url, key: key, secret: secret)
+    }
+
+    private func useLiveKit(url: String, key: String, secret: String) {
+        saveSettings([
+            "livekit": [
+                "url": .string(url), "client_url": .string(url), "api_key": .string(key), "api_secret": .string(secret),
+            ]
+        ])
     }
 
     func pairNewPhone() { run { try await self.api.pair() } }
-    func forget(_ address: String) { run { try await self.api.forget(address); self.loadDeviceState() } }
-
-    func saveSettings(_ body: [String: Any]) {
-        run { self.settings = try await self.api.saveSettings(body) }
-    }
-
-    // MARK: events
-    private func handle(_ ev: Event) {
-        activity.insert(ev, at: 0)
-        if activity.count > 200 { activity.removeLast(activity.count - 200) }
-        switch ev.type {
-        case "call.ringing", "call.dialing", "call.active":
-            if let obj = ev.data["call"]?.objectValue { call = decodeCall(obj) }
-        case "call.ended":
-            if let obj = ev.data["call"]?.objectValue { addRecent(decodeCall(obj)) }
-            call = nil
-            Task { await live.leave() }
-        case "room.opened":
-            if let r = ev.str("room") {
-                call?.room = r
-                // Outbound calls: join the room automatically so you can talk.
-                // Incoming calls wait for the Answer tap.
-                if ev.str("direction") == "out" || call?.direction == "out" {
-                    run { try await self.joinRoom(r) }
-                }
-            }
-        case "phone.connected", "phone.disconnected", "phone.status":
-            Task { await refresh() }
-        case "directory.synced":
-            loadDirectory()
-        default: break
+    func forget(_ address: String) {
+        run {
+            try await self.api.forget(address)
+            self.loadDeviceState()
         }
     }
 
-    private func decodeCall(_ o: [String: JSON]) -> Call {
-        Call(id: o["id"]?.stringValue ?? "", direction: o["direction"]?.stringValue ?? "in",
-             number: o["number"]?.stringValue ?? "", name: o["name"]?.stringValue ?? "",
-             state: o["state"]?.stringValue ?? "", room: o["room"]?.stringValue)
+    func saveSettings(_ changes: JSONObject) {
+        run { self.settings = try await self.api.saveSettings(changes) }
+    }
+}
+
+// MARK: - Events
+
+extension CallCenter {
+    private func handle(_ event: Event) {
+        activity.insert(event, at: 0)
+        if activity.count > Self.activityLimit { activity.removeLast(activity.count - Self.activityLimit) }
+        switch event.type {
+        case EventType.callRinging, EventType.callDialing, EventType.callActive:
+            if let object = event.data["call"]?.objectValue { updateCall(Call(json: object)) }
+        case EventType.callEnded:
+            endCall()
+        case EventType.callFailed:
+            callFailed(event)
+        case EventType.roomOpened:
+            roomOpened(event)
+        case EventType.phoneConnected, EventType.phoneDisconnected, EventType.phoneStatus:
+            Task { await refresh() }
+        case EventType.directorySynced:
+            loadDirectory()
+        default:
+            break  // unknown or informational: shown in Activity only
+        }
     }
 
-    private func addRecent(_ c: Call) {
-        guard !c.number.isEmpty || !c.name.isEmpty else { return }
-        recents.insert(RecentCall(number: c.number, name: c.name, direction: c.direction, at: Date()), at: 0)
-        recents = Array(recents.prefix(50))
+    /// Call events carry the phone's record, whose room is always empty; keep
+    /// the room the box already told us about.
+    private func updateCall(_ update: Call) {
+        var update = update
+        if update.room == nil, let current = call, current.id == update.id { update.room = current.room }
+        call = update
     }
 
-    // MARK: actions
+    private func roomOpened(_ event: Event) {
+        guard let room = event.str("room"), !room.isEmpty else { return }
+        if let id = event.callID, let current = call, current.id != id { return }  // another call's room
+        call?.room = room
+        // Outbound calls: join the room automatically so you can talk.
+        // Incoming calls wait for the Answer tap.
+        if event.str("direction") == "out" || call?.direction == "out" {
+            run { try await self.joinRoom(room) }
+        }
+    }
+
+    /// The box couldn't place, answer or keep a call: say why, and drop the
+    /// call screen if it was this call.
+    private func callFailed(_ event: Event) {
+        error = event.str("error") ?? event.str("reason") ?? "Call failed"
+        guard let current = call else { return }
+        if let id = event.callID, id != current.id { return }
+        if event.callID != nil || current.state == CallState.dialing { endCall() }
+    }
+
+    private func endCall() {
+        call = nil
+        Task { await live.leave() }
+    }
+}
+
+// MARK: - Actions
+
+extension CallCenter {
     func dial(_ number: String) {
-        let n = number.trimmingCharacters(in: .whitespaces)
-        guard !n.isEmpty else { return }
-        run { try await self.api.dial(n) }
+        let trimmed = number.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        run { try await self.api.dial(trimmed) }
     }
 
     func answer() {
-        guard let c = call else { return }
+        guard let call else { return }
         run {
-            let room = try await self.resolveRoom(c)
+            let room = try await self.resolveRoom(call)
             try await self.joinRoom(room)
         }
     }
 
     /// Join a LiveKit room by name (fetch a token, connect, publish mic).
     private func joinRoom(_ room: String) async throws {
-        guard !live.joined && !live.joining else { return }
-        let info = try await api.token(room: room, identity: "mac")
+        guard !live.joined, !live.joining else { return }
+        let info = try await api.token(room: room, identity: Self.macIdentity)
         try await live.join(url: info.url, token: info.token)
     }
 
@@ -260,29 +308,68 @@ final class CallCenter: ObservableObject {
     }
 
     func hangup() {
-        run { try await self.api.hangup(); await self.live.leave() }
+        run {
+            try await self.api.hangup()
+            await self.live.leave()
+        }
     }
 
-    func toggleMute() { Task { await live.toggleMute() } }
+    func toggleMute() { run { try await self.live.toggleMute() } }
 
-
-    private func resolveRoom(_ c: Call) async throws -> String {
-        if let r = c.room { return r }
-        return try await roomName(for: c.id)
-    }
-
-    private func roomName(for id: String) async throws -> String {
+    private func resolveRoom(_ call: Call) async throws -> String {
+        if let room = call.room { return room }
+        // The box opens the room a moment after the call appears: wait for it.
         for _ in 0..<10 {
-            let st = try await api.status()
-            if let r = (st.phone.call ?? st.calls.first(where: { $0.id == id }))?.room { return r }
-            try await Task.sleep(nanoseconds: 300_000_000)
+            let status = try await api.status()
+            if let room = status.calls.first(where: { $0.id == call.id })?.room { return room }
+            try await Task.sleep(for: .milliseconds(300))
         }
-        throw NSError(domain: "AgentPhone", code: 1, userInfo: [NSLocalizedDescriptionKey: "room not ready"])
+        throw APIError.server(status: 0, message: "room not ready")
     }
 
-    private func run(_ op: @escaping () async throws -> Void) {
+    /// Run a user action; a failure shows up in the error banner.
+    private func run(_ operation: @escaping @MainActor () async throws -> Void) {
         Task {
-            do { try await op() } catch { self.error = error.localizedDescription }
+            do {
+                try await operation()
+            } catch {
+                self.error = error.localizedDescription
+            }
         }
+    }
+
+    /// A background refresh: failures are logged, not shown, and read as nil.
+    nonisolated private static func quietly<T: Sendable>(
+        _ what: String, _ operation: @Sendable () async throws -> T
+    ) async -> T? {
+        do {
+            return try await operation()
+        } catch {
+            Log.api.info("\(what, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+}
+
+/// Contact names by the last 10 digits of each of their numbers.
+private struct PhoneBookIndex {
+    private let names: [String: String]
+
+    init(_ contacts: [Contact]) {
+        var byNumber: [String: String] = [:]
+        for contact in contacts {
+            for key in contact.numbers.compactMap(Self.key) where byNumber[key] == nil {
+                byNumber[key] = contact.name
+            }
+        }
+        names = byNumber
+    }
+
+    func name(for number: String) -> String? { Self.key(number).flatMap { names[$0] } }
+
+    /// Too few digits to tell numbers apart: no match rather than a wrong one.
+    private static func key(_ number: String) -> String? {
+        let key = String(number.filter(\.isNumber).suffix(10))
+        return key.count >= 7 ? key : nil
     }
 }

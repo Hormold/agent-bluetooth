@@ -11,10 +11,16 @@ import array
 import asyncio
 import logging
 import wave
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from ...core.bus import EventBus
 from ...core.events import E
-from ...core.ports import PCM_BYTES_PER_SAMPLE, AudioPipe, Call
+from ...core.ports import PCM_BYTES_PER_SAMPLE
+from ...core.tasks import Tasks
+
+if TYPE_CHECKING:
+    from ...core.bus import EventBus
+    from ...core.ports import AudioPipe, Call
 
 log = logging.getLogger(__name__)
 FRAME_MS = 20
@@ -22,13 +28,24 @@ FRAME_MS = 20
 
 class FilePlayer:
     def __init__(
-        self, bus: EventBus, path: str, loop: bool = False, hangup_after: bool = True
+        self,
+        bus: EventBus,
+        path: str,
+        *,
+        tag: str = "",
+        loop: bool = False,
+        hangup_after: bool = True,
     ) -> None:
+        if not Path(path).expanduser().is_file():
+            # Fail before the call is answered, not after with dead air on the line.
+            raise ValueError(f"no such audio file: {path}")
         self.bus = bus
         self.path = path
+        self.tag = tag  # echoed in PLAYBACK_DONE as `handler`
         self.loop = loop
         self.hangup_after = hangup_after
-        self._task: asyncio.Task | None = None
+        self._tasks = Tasks(f"play:{tag or path}")
+        self._task: asyncio.Task[None] | None = None
 
     async def attach_audio(self, call: Call, audio: AudioPipe) -> None:
         # Audio-up is announced on answer and again when the call goes active:
@@ -36,12 +53,14 @@ class FilePlayer:
         if self._task and not self._task.done():
             return
         pcm = _load_wav(self.path, audio.sample_rate)
-        self._task = asyncio.create_task(self._play(call, audio, pcm))
+        self._task = self._tasks.spawn(self._play(call, audio, pcm), name=f"play:{call.id}")
 
     async def close(self, call: Call) -> None:
         if self._task:
-            self._task.cancel()
+            log.debug("stopping playback of %s on call %s", self.path, call.id)
             self._task = None
+        # Wait it out: once close() returns, nothing more reaches the line.
+        await self._tasks.aclose()
 
     async def _play(self, call: Call, audio: AudioPipe, pcm: bytes) -> None:
         frame = audio.sample_rate * FRAME_MS // 1000 * PCM_BYTES_PER_SAMPLE
@@ -59,24 +78,19 @@ class FilePlayer:
         # Let the cushion drain to the caller before reporting done / hanging up.
         await asyncio.sleep(0.5)
         if self.hangup_after:
-            self.bus.publish(E.PLAYBACK_DONE, call_id=call.id, file=self.path)
+            self.bus.publish(E.PLAYBACK_DONE, call_id=call.id, file=self.path, handler=self.tag)
 
 
 def _load_wav(path: str, target_rate: int) -> bytes:
-    with wave.open(path, "rb") as w:
+    with wave.open(str(Path(path).expanduser()), "rb") as w:
         if w.getsampwidth() != PCM_BYTES_PER_SAMPLE:
-            raise ValueError(
-                f"{path}: need 16-bit PCM WAV, got {w.getsampwidth() * 8}-bit"
-            )
+            raise ValueError(f"{path}: need 16-bit PCM WAV, got {w.getsampwidth() * 8}-bit")
         channels, rate = w.getnchannels(), w.getframerate()
         samples = array.array("h", w.readframes(w.getnframes()))
     if channels > 1:  # downmix to mono
         samples = array.array(
             "h",
-            (
-                sum(samples[i : i + channels]) // channels
-                for i in range(0, len(samples), channels)
-            ),
+            (sum(samples[i : i + channels]) // channels for i in range(0, len(samples), channels)),
         )
     if rate != target_rate:  # linear resample
         samples = _resample(samples, rate, target_rate)

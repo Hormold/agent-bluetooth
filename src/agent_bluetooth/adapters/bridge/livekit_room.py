@@ -9,17 +9,24 @@ import logging
 import os
 import re
 import time
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from functools import partial
+from typing import TYPE_CHECKING, Any
 
 from livekit import api, rtc
 from livekit.protocol.agent_dispatch import RoomAgentDispatch
 from livekit.protocol.room import RoomConfiguration
 
-from ...core.context import Context
-from ...core.events import E, Event
-from ...core.ports import PCM_BYTES_PER_SAMPLE, AudioPipe, Call
+from ...core.events import E
+from ...core.ports import PCM_BYTES_PER_SAMPLE
+from ...core.tasks import Tasks
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from ...core.context import Context
+    from ...core.events import Event
+    from ...core.ports import AudioPipe, Call
 
 log = logging.getLogger(__name__)
 SIP_STATUS = {
@@ -48,28 +55,26 @@ class _Session:
     streams: dict[str, AsyncIterator[rtc.AudioFrame]] = field(default_factory=dict)
     mixer: rtc.AudioMixer | None = None
     pipe: AudioPipe | None = None
-    tasks: list[asyncio.Task] = field(default_factory=list)
+    tasks: Tasks = field(init=False)  # uplink/downlink of the attached audio link
     connected: asyncio.Event = field(default_factory=asyncio.Event)
     # audio-up is announced on dialing AND again when the call goes active; the
     # two attach calls must not interleave or we publish two phone tracks.
     attach_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     publication_sid: str | None = None
 
+    def __post_init__(self) -> None:
+        self.tasks = Tasks(f"room:{self.name}")
+
 
 class LiveKitBridge:
     def __init__(self, ctx: Context, cfg: dict[str, Any]) -> None:
         self.bus = ctx.bus
-        self.url = cfg.get("url") or os.environ.get(
-            "LIVEKIT_URL", "ws://localhost:7880"
-        )
+        self.url = cfg.get("url") or os.environ.get("LIVEKIT_URL", "ws://localhost:7880")
         self.client_url = cfg.get("client_url") or self.url  # what browsers use
         self.api_key = cfg.get("api_key") or os.environ.get("LIVEKIT_API_KEY", "devkey")
-        self.api_secret = cfg.get("api_secret") or os.environ.get(
-            "LIVEKIT_API_SECRET", "secret"
-        )
+        self.api_secret = cfg.get("api_secret") or os.environ.get("LIVEKIT_API_SECRET", "secret")
         self.room_prefix = cfg.get("room_prefix", "call-")
         self.identity = cfg.get("identity", "phone")
-        self.agent_name = cfg.get("agent_name", "")  # explicit agent dispatch, optional
         self.sessions: dict[str, _Session] = {}
 
     async def start(self) -> None:
@@ -102,25 +107,38 @@ class LiveKitBridge:
         return len(s.room.remote_participants) if s else 0
 
     def join_info(self, room: str, identity: str) -> dict[str, Any]:
-        token = self._token(identity, room).with_grants(
-            api.VideoGrants(
-                room_join=True, room=room, can_publish=True, can_subscribe=True
-            )
+        token = self._token(identity).with_grants(
+            api.VideoGrants(room_join=True, room=room, can_publish=True, can_subscribe=True)
         )
         return {"url": self.client_url, "room": room, "token": token.to_jwt()}
 
-    async def open(self, call: Call) -> dict[str, Any]:
+    async def open(self, call: Call, *, agent_name: str = "") -> dict[str, Any]:
         digits = re.sub(r"\D", "", call.number)[-10:] or "unknown"
-        name = (
-            call.room or f"{self.room_prefix}{time.strftime('%Y%m%d-%H%M%S')}-{digits}"
-        )
+        name = call.room or f"{self.room_prefix}{time.strftime('%Y%m%d-%H%M%S')}-{digits}"
         room = rtc.Room()
         s = self.sessions[call.id] = _Session(call=call, room=room, name=name)
         self._wire_events(s)
+        try:
+            await self._connect(room, self._phone_token(call, name, agent_name))
+        except BaseException:
+            # Refused, timed out, or the call ended mid-connect (cancelled): leave
+            # nothing behind, so a later open() for this call starts clean.
+            if self.sessions.get(call.id) is s:
+                del self.sessions[call.id]
+            await room.disconnect()
+            raise
+        s.connected.set()
+        log.info("call %s -> room %s", call.id, name)
+        return {"room": name, "url": self.client_url}
 
-        token = self._token(self.identity, name).with_name(
-            call.name or call.number or "phone"
-        )
+    async def _connect(self, room: rtc.Room, token: api.AccessToken) -> None:
+        try:
+            await room.connect(self.url, token.to_jwt())
+        except rtc.ConnectError as exc:  # the port speaks RuntimeError: "not right now"
+            raise RuntimeError(f"LiveKit at {self.url}: {exc}") from exc
+
+    def _phone_token(self, call: Call, name: str, agent_name: str) -> api.AccessToken:
+        token = self._token(self.identity).with_name(call.name or call.number or "phone")
         # Present the line exactly like a LiveKit SIP participant (kind=SIP,
         # sip.* attributes), so telephony agents and tools work unchanged.
         token.with_kind("sip")
@@ -138,24 +156,19 @@ class LiveKitBridge:
             }
         )
         # can_update_own_metadata: lets us keep sip.callStatus / sip.phoneNumber live
-        token.with_grants(
-            api.VideoGrants(room_join=True, room=name, can_update_own_metadata=True)
-        )
-        if self.agent_name:
+        token.with_grants(api.VideoGrants(room_join=True, room=name, can_update_own_metadata=True))
+        if agent_name:
             token.with_room_config(
                 RoomConfiguration(
                     agents=[
                         RoomAgentDispatch(
-                            agent_name=self.agent_name,
+                            agent_name=agent_name,
                             metadata=json.dumps(call.to_dict()),
                         )
                     ]
                 )
             )
-        await room.connect(self.url, token.to_jwt())
-        s.connected.set()
-        log.info("call %s -> room %s", call.id, name)
-        return {"room": name, "url": self.client_url}
+        return token
 
     async def attach_audio(self, call: Call, audio: AudioPipe) -> None:
         s = self.sessions.get(call.id)
@@ -190,10 +203,8 @@ class LiveKitBridge:
         s.mixer = rtc.AudioMixer(rate, 1, blocksize=rate // 50)
         for sid, t in s.tracks.items():
             self._add_stream(s, sid, t)
-        s.tasks = [
-            asyncio.create_task(self._uplink(audio, source)),
-            asyncio.create_task(self._downlink(s.mixer, audio)),
-        ]
+        s.tasks.spawn(self._uplink(audio, source), name=f"uplink:{s.name}")
+        s.tasks.spawn(self._downlink(s.mixer, audio), name=f"downlink:{s.name}")
 
     async def close(self, call: Call) -> None:
         s = self.sessions.pop(call.id, None)
@@ -204,77 +215,64 @@ class LiveKitBridge:
         log.info("room %s closed", s.name)
 
     # internals -------------------------------------------------------------
-    def _token(self, identity: str, room: str) -> api.AccessToken:
+    def _token(self, identity: str) -> api.AccessToken:
         return api.AccessToken(self.api_key, self.api_secret).with_identity(identity)
 
     def _wire_events(self, s: _Session) -> None:
-        room = s.room
+        # The emitter passes only as many args as the callback takes, so each
+        # handler drops the trailing ones it doesn't need.
+        s.room.on("participant_connected", partial(self._on_participant, s, E.ROOM_JOINED))
+        s.room.on("participant_disconnected", partial(self._on_participant, s, E.ROOM_LEFT))
+        s.room.on("sip_dtmf_received", partial(self._on_dtmf, s))
+        s.room.on("track_subscribed", partial(self._on_track_subscribed, s))
+        s.room.on("track_unsubscribed", partial(self._on_track_unsubscribed, s))
 
-        def others() -> int:
-            return len(room.remote_participants)
+    def _on_participant(self, s: _Session, event: str, p: rtc.RemoteParticipant) -> None:
+        self.bus.publish(
+            event,
+            call_id=s.call.id,
+            room=s.name,
+            identity=p.identity,
+            others=len(s.room.remote_participants),
+        )
 
-        @room.on("participant_connected")
-        def _joined(p: rtc.RemoteParticipant) -> None:
-            self.bus.publish(
-                E.ROOM_JOINED,
-                call_id=s.call.id,
-                room=s.name,
-                identity=p.identity,
-                others=others(),
-            )
+    def _on_dtmf(self, s: _Session, dtmf: rtc.SipDTMF) -> None:
+        # Any participant's publish_dtmf() reaches the phone line, like SIP.
+        who = dtmf.participant.identity if dtmf.participant else ""
+        self.bus.publish(
+            E.DTMF_RECEIVED,
+            call_id=s.call.id,
+            digit=dtmf.digit,
+            code=dtmf.code,
+            identity=who,
+        )
 
-        @room.on("participant_disconnected")
-        def _left(p: rtc.RemoteParticipant) -> None:
-            self.bus.publish(
-                E.ROOM_LEFT,
-                call_id=s.call.id,
-                room=s.name,
-                identity=p.identity,
-                others=others(),
-            )
+    def _on_track_subscribed(
+        self, s: _Session, track: rtc.Track, pub: rtc.RemoteTrackPublication
+    ) -> None:
+        if track.kind == rtc.TrackKind.KIND_AUDIO:
+            s.tracks[pub.sid] = track
+            if s.mixer:
+                self._add_stream(s, pub.sid, track)
 
-        @room.on("sip_dtmf_received")
-        def _dtmf(dtmf: rtc.SipDTMF) -> None:
-            # Any participant's publish_dtmf() reaches the phone line, like SIP.
-            who = dtmf.participant.identity if dtmf.participant else ""
-            self.bus.publish(
-                E.DTMF_RECEIVED,
-                call_id=s.call.id,
-                digit=dtmf.digit,
-                code=dtmf.code,
-                identity=who,
-            )
-
-        @room.on("track_subscribed")
-        def _sub(
-            track: rtc.Track, pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant
-        ) -> None:
-            if track.kind == rtc.TrackKind.KIND_AUDIO:
-                s.tracks[pub.sid] = track
-                if s.mixer:
-                    self._add_stream(s, pub.sid, track)
-
-        @room.on("track_unsubscribed")
-        def _unsub(
-            track: rtc.Track, pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant
-        ) -> None:
-            s.tracks.pop(pub.sid, None)
-            stream = s.streams.pop(pub.sid, None)
-            if stream and s.mixer:
-                s.mixer.remove_stream(stream)
+    @staticmethod
+    def _on_track_unsubscribed(
+        s: _Session, _track: rtc.Track, pub: rtc.RemoteTrackPublication
+    ) -> None:
+        s.tracks.pop(pub.sid, None)
+        stream = s.streams.pop(pub.sid, None)
+        if stream and s.mixer:
+            s.mixer.remove_stream(stream)
 
     def _add_stream(self, s: _Session, sid: str, track: rtc.Track) -> None:
-        assert s.mixer and s.pipe
-        stream = _frames(
-            rtc.AudioStream(track, sample_rate=s.pipe.sample_rate, num_channels=1)
-        )
+        if s.mixer is None or s.pipe is None:
+            raise RuntimeError(f"room {s.name}: audio not attached")
+        stream = _frames(rtc.AudioStream(track, sample_rate=s.pipe.sample_rate, num_channels=1))
         s.streams[sid] = stream
         s.mixer.add_stream(stream)
 
     async def _detach(self, s: _Session) -> None:
-        for t in s.tasks:
-            t.cancel()
-        s.tasks = []
+        await s.tasks.aclose()  # before the mixer closes under the downlink
         if s.mixer:
             await s.mixer.aclose()
             s.mixer = None

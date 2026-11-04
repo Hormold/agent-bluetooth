@@ -1,6 +1,6 @@
 [project]
 name = "agent-bluetooth"
-version = "0.1.0"
+version = "0.2.0"
 description = "Let your AI agent make and take calls on your real phone, over a USB Bluetooth dongle and LiveKit"
 readme = "README.md"
 license = "MIT"
@@ -12,6 +12,7 @@ requires-python = ">=3.11"
 dependencies = [
     "aiohttp>=3.14.5",
     "bumble>=0.0.236",
+    "libusb1>=3.4.0",  # imported directly (usb_sink, usb_devices), not only via bumble
     "livekit>=1.1.21",
     "livekit-api>=1.2.2",
 ]
@@ -26,3 +27,70 @@ agent-bluetooth = "agent_bluetooth.cli:main"
 [build-system]
 requires = ["uv_build>=0.11.6,<0.12.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["ruff==0.17.3", "ty==0.0.94", "deptry==0.25.1", "import-linter==2.15"]
+
+# Lint bar: every rule on, then opt OUT of ceremony with a reason.
+# New ruff rules land automatically on upgrade (pinned above, so upgrades are deliberate).
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src"]
+extend-exclude = ["examples/**/.venv"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",       # docstring mandates: comments where they earn it, not on every def
+    "CPY",     # no license headers per file
+    "COM812",  # conflicts with the formatter
+    "ISC001",  # conflicts with the formatter
+    "E501",    # formatter owns line length
+    "TID252",  # relative imports are the package convention
+    "EM101",   # exception-message ceremony, catches no bugs
+    "EM102",
+    "TRY003",
+]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"asyncio.create_task".msg = "Spawn through an owner's core.tasks.Tasks, which close() cancels and awaits"
+"asyncio.ensure_future".msg = "Spawn through an owner's core.tasks.Tasks, which close() cancels and awaits"
+
+[tool.ruff.lint.per-file-ignores]
+# The one place allowed to create tasks: everything else owns a Tasks.
+"src/agent_bluetooth/core/tasks.py" = ["TID251"]
+# The agent guide prints by design: stdout is the product.
+"src/agent_bluetooth/guide.py" = ["T201"]
+# Port stubs: unused args are interface conformance, not dead code.
+"src/agent_bluetooth/adapters/**/{null,fake}.py" = ["ARG002"]
+"src/agent_bluetooth/adapters/sinks/*.py" = ["ARG002"]
+# Standalone example agent, not part of the package.
+"examples/**" = ["INP001", "T201"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 8
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-base-classes = []
+strict = true
+
+[tool.ty.src]
+include = ["src"]
+
+[tool.ty.rules]
+# Off by default in ty; both catch real holes (bare generics, returns that lie).
+missing-type-argument = "error"
+unsound-return-statement = "error"
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.deptry]
+known_first_party = ["agent_bluetooth"]
+
+[tool.deptry.package_module_name_map]
+livekit-api = "livekit"

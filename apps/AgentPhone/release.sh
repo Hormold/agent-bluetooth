@@ -14,6 +14,7 @@
 set -euo pipefail
 
 VERSION=${1:?usage: release.sh <version>}
+git diff --quiet HEAD -- . ../../src || { echo "commit the app and daemon first: the release tags HEAD" >&2; exit 1; }
 : "${TEAM_ID:?set TEAM_ID to your Apple Developer team id}"
 : "${NOTARY_PROFILE:?set NOTARY_PROFILE (see xcrun notarytool store-credentials)}"
 cd "$(dirname "$0")"
@@ -48,9 +49,23 @@ ditto -c -k --keepParent "$OUT/$APP_NAME" "$OUT.zip"   # zip again, now with the
 spctl --assess --type execute --verbose "$OUT/$APP_NAME"
 
 echo "Publishing v$VERSION..."
+# Notes: this version's CHANGELOG.md section, then how to install the app.
+NOTES="$DIST/notes-$VERSION.md"
+awk -v v="$VERSION" '$0 ~ "^## "v" " {on=1; next} /^## / {on=0} on' ../../CHANGELOG.md > "$NOTES"
+[ -s "$NOTES" ] || { echo "CHANGELOG.md has no section for $VERSION" >&2; exit 1; }
+cat >> "$NOTES" <<'TXT'
+
+### Install
+
+Agent Phone (macOS): download the zip below, move Agent Phone to Applications and open it. It checks what's missing (the Agent Bluetooth service, LiveKit, permissions) and sets it up.
+
+Daemon and CLI: `uv tool install --force git+https://github.com/Hormold/agent-bluetooth@vVERSION`
+TXT
+sed -i '' "s/vVERSION/v$VERSION/" "$NOTES"
 gh release create "v$VERSION" "$OUT.zip" \
   --repo Hormold/agent-bluetooth \
-  --title "Agent Phone $VERSION" \
-  --notes "Signed and notarized macOS app. Unzip, move Agent Phone to Applications, open it: it checks what's missing (the Agent Bluetooth service, LiveKit, permissions) and sets it up."
+  --target "$(git rev-parse HEAD)" \
+  --title "Agent Bluetooth $VERSION" \
+  --notes-file "$NOTES"
 
 echo "Done: https://github.com/Hormold/agent-bluetooth/releases/tag/v$VERSION"

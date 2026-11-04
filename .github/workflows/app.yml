@@ -1,0 +1,29 @@
+name: app
+on:
+  push:
+    branches: [master]
+    paths: ["apps/AgentPhone/**", ".github/workflows/app.yml"]
+  pull_request:
+    paths: ["apps/AgentPhone/**", ".github/workflows/app.yml"]
+jobs:
+  check:
+    runs-on: macos-latest
+    env:
+      SWIFTLINT_VERSION: 0.65.1  # pinned: `opt_in_rules: all` picks up every new rule on upgrade
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable  # Swift 6 + a current swift-format
+      - name: Tools
+        run: |
+          brew install xcodegen
+          curl -fsSL -o /tmp/swiftlint.zip \
+            "https://github.com/realm/SwiftLint/releases/download/${SWIFTLINT_VERSION}/portable_swiftlint.zip"
+          unzip -q /tmp/swiftlint.zip -d /tmp/swiftlint
+          echo /tmp/swiftlint >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: apps/AgentPhone/.build/check/SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('apps/AgentPhone/project.yml') }}
+      - run: apps/AgentPhone/check.sh

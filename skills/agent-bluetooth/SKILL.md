@@ -115,5 +115,8 @@ First check `phone.radio_error` in `status`: if set, the Bluetooth dongle isn't
 working and `hint` says exactly what to do (wrong transport id, missing vendor
 firmware, another driver holding the device). Tell the user that step instead of
 retrying. Then read phone connection state, current calls, events and logs.
-API/request failures exit 1; invalid CLI arguments exit 2. Never retry a call or
-SMS blindly after a timeout: inspect status and recent SMS first.
+API/request failures exit 1; invalid CLI arguments exit 2. A phone that refuses
+answer/hangup/dtmf/volume exits 1 too (HTTP 502, or 504 when it didn't reply), and
+a refused dial arrives as a `call.failed` event with the `request_id` that `call`
+returned. Never retry a call or SMS blindly after a timeout: inspect status and
+recent SMS first.

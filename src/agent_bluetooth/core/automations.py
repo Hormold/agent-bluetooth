@@ -17,15 +17,17 @@ Matching is glob/regex only. Anything needing meaning is handed to an agent.
 
 from __future__ import annotations
 
-import asyncio
 import fnmatch
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .context import Context
-from .events import Event
+from .tasks import Tasks
+
+if TYPE_CHECKING:
+    from .context import Context
+    from .events import Event
 
 log = logging.getLogger(__name__)
 Action = Callable[[dict[str, Any], dict[str, str]], Awaitable[None]]
@@ -36,6 +38,7 @@ class AutomationEngine:
     def __init__(self, ctx: Context, actions: dict[str, Action]) -> None:
         self.rules: list[dict[str, Any]] = ctx.config.get("automations", [])
         self.actions = actions
+        self.tasks = Tasks(f"{ctx.bus.instance}:automations")  # running actions
         for rule in self.rules:
             if rule.get("do") not in actions:
                 log.warning(
@@ -61,15 +64,14 @@ class AutomationEngine:
             if action is None:
                 continue
             ctx_vars = {**fields, **extracted}
-            params = {
-                k: _render(v, ctx_vars) for k, v in rule.items() if isinstance(v, str)
-            }
-            log.info(
-                "automation %r fired on %s", rule.get("name", rule["do"]), event.type
-            )
-            asyncio.create_task(
-                self._run(rule.get("name", rule["do"]), action, params, ctx_vars)
-            )
+            params = {k: _render(v, ctx_vars) for k, v in rule.items() if isinstance(v, str)}
+            name = rule.get("name", rule["do"])
+            log.info("automation %r fired on %s", name, event.type)
+            self.tasks.spawn(self._run(name, action, params, ctx_vars), name=f"automation:{name}")
+
+    async def aclose(self) -> None:
+        """Daemon shutdown: cancel the actions still running."""
+        await self.tasks.aclose()
 
     async def _run(
         self,

@@ -10,41 +10,59 @@ Transport examples (see https://google.github.io/bumble/transports/):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Callable
+import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from bumble import rfcomm, sdp
+from bumble import rfcomm
 from bumble.core import BT_BR_EDR_TRANSPORT
-from bumble.device import Connection, Device, DeviceConfiguration
+from bumble.device import Device, DeviceConfiguration
 from bumble.transport import open_transport
+from bumble.transport.common import TransportInitError
 
-from ...core.context import Context
-from . import usb_sink
+from ...core.context import ResourceKey
+from ...core.tasks import Tasks
+from ...core.watchdog import fatal
+from . import usb_devices, usb_sink
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+
+    from bumble import sdp
+    from bumble.device import Connection
+    from bumble.transport.common import Transport
+
+    from ...core.context import Context
 
 log = logging.getLogger(__name__)
+RTK_FIRMWARE_ENV = "BUMBLE_RTK_FIRMWARE_DIR"
+DEFAULT_FIRMWARE_DIR = "~/.agent-bluetooth/rtl_bt"  # shared by every instance on the host
 
 
 class RadioProblem:
     """Why the radio isn't up, in words a person or an agent can act on.
     Exposed in phone status as `radio_error` ({error, hint}). Deliberately no
-    auto-fixing: dongles and systems differ, so we explain and point the way."""
+    auto-fixing: dongles and systems differ, so we explain and point the way.
+    One per daemon (a Context resource), never process-global."""
 
-    error: str | None = None
-    hint: str | None = None
-
-    @classmethod
-    def set(cls, error: str, spec: str) -> None:
-        cls.error, cls.hint = error, _hint(error, spec)
+    def __init__(self) -> None:
+        self.error: str | None = None
+        self.hint: str | None = None
 
     @classmethod
-    def clear(cls) -> None:
-        cls.error = cls.hint = None
+    def of(cls, ctx: Context) -> RadioProblem:
+        return ctx.sync_resource(ResourceKey("radio_problem", cls), cls)
 
-    @classmethod
-    def as_dict(cls) -> dict[str, str] | None:
-        return {"error": cls.error, "hint": cls.hint or ""} if cls.error else None
+    def set(self, error: str, spec: str) -> None:
+        self.error, self.hint = error, _hint(error, spec)
+
+    def clear(self) -> None:
+        self.error = self.hint = None
+
+    def as_dict(self) -> dict[str, str] | None:
+        return {"error": self.error, "hint": self.hint or ""} if self.error else None
 
 
 def _hint(error: str, spec: str) -> str:
@@ -68,53 +86,91 @@ def _hint(error: str, spec: str) -> str:
         or "no_device" in e
     ):
         return (
-            f"No USB Bluetooth dongle matched transport '{spec}'. Check it is plugged in, find "
-            "its VID:PID (lsusb on Linux, System Information > USB on macOS) and set "
-            '[bluetooth] transport = "usb:VID:PID+sco=2".'
+            f"No USB Bluetooth dongle matched transport '{spec}'. Check it is plugged in; "
+            "`agent-bluetooth radios` lists the dongles present with a transport for each, "
+            "for [bluetooth] transport. Waiting: it comes up by itself once plugged in."
         )
     return f"Opening '{spec}' failed. Check the dongle and [bluetooth] transport, then run agent-bluetooth logs."
 
 
 class _FirmwareWarnings(logging.Handler):
     """Bumble's vendor drivers only log a warning when firmware is missing and
-    keep going with a half-working radio. Turn that into a visible problem."""
+    keep going with a half-working radio. Turn that into a visible problem.
+    Attached only while this radio opens, so it can't blame another dongle."""
 
-    spec = ""
+    def __init__(self, problem: RadioProblem, spec: str) -> None:
+        super().__init__(logging.WARNING)
+        self.problem, self.spec = problem, spec
 
     def emit(self, record: logging.LogRecord) -> None:
         msg = record.getMessage()
         if "Firmware file" in msg and "not found" in msg:
-            RadioProblem.set(msg, self.spec)
+            self.problem.set(msg, self.spec)
 
 
-_firmware_watch = _FirmwareWarnings(logging.WARNING)
-logging.getLogger("bumble.drivers").addHandler(_firmware_watch)
-CLASS_HANDS_FREE = (
-    0x240408  # services: Audio + Rendering; device: Audio/Video, Hands-free
-)
+@contextlib.contextmanager
+def _watch_firmware(problem: RadioProblem, spec: str) -> Generator[None]:
+    handler = _FirmwareWarnings(problem, spec)
+    logger = logging.getLogger("bumble.drivers")
+    logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+
+
+CLASS_HANDS_FREE = 0x240408  # services: Audio + Rendering; device: Audio/Video, Hands-free
+OPEN_RETRY_DELAY = 2.0  # s between radio open attempts; lets a released USB claim settle
+
+
+def _prepare_keystore(path: str) -> Path:
+    keystore = Path(path).expanduser()
+    keystore.parent.mkdir(parents=True, exist_ok=True)
+    return keystore
+
+
+class RadioAbsentError(RuntimeError):
+    """No device matches the transport: unplugged, or another port. Not a fault
+    to restart over; the caller waits for it to appear."""
+
+    def __init__(self, spec: str) -> None:
+        super().__init__(f"no Bluetooth dongle at {spec}")
+        self.spec = spec
+
+
+def _use_firmware_dir(cfg: dict[str, Any]) -> None:
+    """Point Bumble's Realtek driver at our firmware folder. Without it a
+    RTL8761B dongle (TP-Link UB500 etc.) comes up half-working: "radio up", but
+    with ROM firmware that drops links. An explicit env var always wins."""
+    if RTK_FIRMWARE_ENV in os.environ:
+        return
+    folder = Path(cfg.get("firmware_dir", DEFAULT_FIRMWARE_DIR)).expanduser()
+    if folder.is_dir():
+        os.environ[RTK_FIRMWARE_ENV] = str(folder)
 
 
 class BumbleRadio:
-    def __init__(self, device: Device, transport: Any) -> None:
+    def __init__(self, device: Device, transport: Transport, *, discoverable: bool) -> None:
         self.device = device
         self.transport = transport
+        self.discoverable_baseline = discoverable  # outside a pairing window
         self.rfcomm = rfcomm.Server(device)
         self._muxes: dict[int, rfcomm.Multiplexer] = {}
         self._next_sdp_handle = 0x00010001
-        self.peer_names: dict[
-            str, str
-        ] = {}  # address -> friendly name, learned on connect
+        self.peer_names: dict[str, str] = {}  # address -> friendly name, learned on connect
+        self._tasks = Tasks(f"radio:{device.public_address}")
 
     @classmethod
     async def shared(cls, ctx: Context) -> BumbleRadio:
         return await ctx.resource(
-            "bumble", lambda: cls.open(ctx.config.get("bluetooth", {}))
+            ResourceKey("bumble", cls),
+            lambda: cls.open(ctx.config.get("bluetooth", {}), RadioProblem.of(ctx)),
         )
 
     @classmethod
-    async def open(cls, cfg: dict[str, Any]) -> BumbleRadio:
-        """Bring the radio up, retrying through a USB controller power-cycle if
-        the dongle is wedged — so it recovers on its own with no replug."""
+    async def open(cls, cfg: dict[str, Any], problem: RadioProblem) -> BumbleRadio:
+        """Bring the radio up, retrying a plain open a few times; an absent dongle
+        raises RadioAbsentError at once."""
         spec = cfg.get("transport", "usb:0")
         # NOTE: we do NOT power-cycle the USB controller from inside the running
         # daemon — doing so while libusb holds the device knocks the dongle off
@@ -123,31 +179,46 @@ class BumbleRadio:
         # process holds the device. Here we just retry a plain open.
         attempts = int(cfg.get("open_attempts", 3))
         last_error: Exception | None = None
+        _use_firmware_dir(cfg)
         for attempt in range(1, attempts + 1):
             try:
-                _firmware_watch.spec = spec
-                radio = await cls._open_once(cfg, spec)
-                if (
-                    RadioProblem.error is None
-                    or "firmware" not in RadioProblem.error.lower()
-                ):
-                    RadioProblem.clear()
-                return radio
-            except Exception as e:
+                radio = await cls._open_reporting(cfg, spec, problem)
+            except RadioAbsentError:
+                raise  # retrying now won't plug it in; the caller waits
+            except Exception as e:  # hardware I/O: any failure is reported and retried
                 last_error = e
-                RadioProblem.set(str(e) or type(e).__name__, spec)
                 log.warning("radio open attempt %d/%d failed: %s", attempt, attempts, e)
+                log.debug("radio open failure detail", exc_info=True)
                 if attempt < attempts:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(OPEN_RETRY_DELAY)
+            else:
+                return radio
         raise RuntimeError(f"could not bring up radio on {spec}") from last_error
 
     @classmethod
+    async def _open_reporting(
+        cls, cfg: dict[str, Any], spec: str, problem: RadioProblem
+    ) -> BumbleRadio:
+        """One open; its outcome becomes the radio's visible problem (or lack of one)."""
+        try:
+            with _watch_firmware(problem, spec):
+                radio = await cls._open_once(cfg, spec)
+        except TransportInitError as e:
+            problem.set(str(e), spec)
+            if str(e) == "device not found":
+                raise RadioAbsentError(spec) from e
+            raise
+        except Exception as e:
+            problem.set(str(e) or type(e).__name__, spec)
+            raise
+        if problem.error is None or "firmware" not in problem.error.lower():
+            problem.clear()
+        return radio
+
+    @classmethod
     async def _open_once(cls, cfg: dict[str, Any], spec: str) -> BumbleRadio:
-        keystore = Path(
-            cfg.get("keystore", "~/.agent-bluetooth/keys.json")
-        ).expanduser()
-        keystore.parent.mkdir(parents=True, exist_ok=True)
-        log.info("opening Bluetooth transport %s", spec)
+        keystore = await asyncio.to_thread(_prepare_keystore, cfg["keystore"])
+        log.debug("opening Bluetooth transport %s", spec)  # polled while unplugged
         usb_sink.install()  # SCO gets its own USB lane (see usb_sink.py)
         transport = await asyncio.wait_for(open_transport(spec), timeout=15)
         config = DeviceConfiguration(
@@ -157,24 +228,24 @@ class BumbleRadio:
             classic_enabled=True,
             le_enabled=False,
         )
+        discoverable = bool(cfg.get("discoverable", True))
         try:
-            device = Device.from_config_with_hci(
-                config, transport.source, transport.sink
-            )
+            device = Device.from_config_with_hci(config, transport.source, transport.sink)
             await asyncio.wait_for(device.power_on(), timeout=15)
-            await device.set_discoverable(bool(cfg.get("discoverable", True)))
+            await device.set_discoverable(discoverable)
             await device.set_connectable(True)
         except BaseException:
             # Release the USB claim, or every retry in this process gets BUSY.
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(transport.close(), timeout=3)
-            except Exception:
-                pass
             raise
         log.info("radio up: %s (%s)", config.name, device.public_address)
-        radio = cls(device, transport)
-        radio._watch = asyncio.create_task(_watch_usb(spec, transport))
+        radio = cls(device, transport, discoverable=discoverable)
+        radio.watch_usb()
         return radio
+
+    def watch_usb(self) -> None:
+        self._tasks.spawn(_watch_usb(self.transport), name="usb-watch")
 
     def add_sdp_record(self, make: Callable[[int], list[sdp.ServiceAttribute]]) -> int:
         """`make(handle)` builds the record; the handle is embedded in it."""
@@ -212,34 +283,29 @@ class BumbleRadio:
     async def bonded(self) -> list[dict[str, Any]]:
         """Paired phones with name (if known) and whether they're connected now."""
         connected = self.connected_addresses()
-        out = []
-        for address in await self.bonded_addresses():
-            out.append(
-                {
-                    "address": address,
-                    "name": self.peer_names.get(address, ""),
-                    "connected": address in connected,
-                }
-            )
-        return out
+        return [
+            {
+                "address": address,
+                "name": self.peer_names.get(address, ""),
+                "connected": address in connected,
+            }
+            for address in await self.bonded_addresses()
+        ]
 
     async def forget(self, address: str) -> None:
         for c in list(self.device.connections.values()):
             if str(c.peer_address) == address:
-                try:
+                with contextlib.suppress(Exception):
                     await c.disconnect()
-                except Exception:
-                    pass
         if self.device.keystore is not None:
-            try:
+            # KeyError: not bonded with this controller (e.g. after swapping dongles)
+            with contextlib.suppress(KeyError):
                 await self.device.keystore.delete(address)
-            except KeyError:
-                pass  # not bonded with this controller (e.g. after swapping dongles)
         self.peer_names.pop(address, None)
 
-    async def set_discoverable(self, on: bool) -> None:
+    async def set_discoverable(self, *, on: bool) -> None:
         await self.device.set_discoverable(on)
-        await self.device.set_connectable(on or True)
+        await self.device.set_connectable(True)  # always: the phone must reconnect
 
     def existing_connection(self, address: str) -> Connection | None:
         for c in self.device.connections.values():
@@ -253,9 +319,7 @@ class BumbleRadio:
         if (existing := self.existing_connection(address)) is not None:
             return existing
         try:
-            connection = await self.device.connect(
-                address, transport=BT_BR_EDR_TRANSPORT
-            )
+            connection = await self.device.connect(address, transport=BT_BR_EDR_TRANSPORT)
         except Exception:
             if (existing := self.existing_connection(address)) is not None:
                 return existing
@@ -265,54 +329,24 @@ class BumbleRadio:
         return connection
 
     async def close(self) -> None:
+        await self._tasks.aclose(timeout=1)  # the watcher must not see the close as a lost dongle
         await asyncio.wait_for(self.transport.close(), 3)
 
 
-def _usb_identity(vid: int, pid: int) -> tuple[str, str] | None:
-    """(busnum, devnum) of the present VID:PID device, or None if it's gone."""
-    import glob
-
-    for d in glob.glob("/sys/bus/usb/devices/*"):
-        try:
-            with open(f"{d}/idVendor") as f:
-                if int(f.read().strip(), 16) != vid:
-                    continue
-            with open(f"{d}/idProduct") as f:
-                if int(f.read().strip(), 16) != pid:
-                    continue
-            with open(f"{d}/busnum") as f:
-                bus = f.read().strip()
-            with open(f"{d}/devnum") as f:
-                dev = f.read().strip()
-            return bus, dev
-        except (OSError, ValueError):
-            continue
-    return None
-
-
-async def _watch_usb(spec: str, transport: Any) -> None:
+async def _watch_usb(transport: Transport) -> None:
     """If the dongle is unplugged/replugged, our libusb handle is dead forever.
-    Detect it (device gone or re-enumerated with a new devnum, or the transport
-    reports termination) and exit, so systemd restarts us with a fresh handle.
-    This is what makes a physical replug just work."""
-    import os
-
-    from .usb_reset import parse_usb_ids
-
-    ids = parse_usb_ids(spec)
-    if ids is None:
-        return
-    start = _usb_identity(*ids)
-    terminated = getattr(getattr(transport, "source", None), "terminated", None)
+    Detect it (the transport reports termination, or on Linux the device at our
+    port path is gone or re-enumerated) and exit, so the supervisor restarts us
+    with a fresh handle. This is what makes a physical replug just work. Only
+    this daemon's dongle is watched, by port path: siblings in a farm sharing a
+    VID:PID can come and go without restarting us."""
+    handle = getattr(transport.sink, "device", None)
+    path = usb_devices.device_path(handle.getDevice()) if handle is not None else None
+    start = usb_devices.sysfs_identity(path) if path else None
+    terminated = getattr(transport.source, "terminated", None)
     while True:
         await asyncio.sleep(3)
-        now = _usb_identity(*ids)
+        now = usb_devices.sysfs_identity(path) if path else None
         dead = terminated is not None and terminated.done()
-        if now != start or dead:
-            log.error(
-                "USB radio lost (was %s, now %s, terminated=%s); exiting for a clean restart",
-                start,
-                now,
-                dead,
-            )
-            os._exit(3)
+        if dead or now != start:
+            fatal(3, f"USB radio {path} lost (devnum {start} -> {now}, terminated={dead})")

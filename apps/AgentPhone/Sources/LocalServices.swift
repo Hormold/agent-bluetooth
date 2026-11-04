@@ -9,6 +9,7 @@ enum LocalServices {
     static let dataDir = home.appendingPathComponent(".agent-bluetooth")
     static let configFile = dataDir.appendingPathComponent("config.toml")
     static let repo = "git+https://github.com/Hormold/agent-bluetooth"
+    static let logHint = "~/.agent-bluetooth/*.log"  // launchAgent() writes <name>.log into dataDir
 
     // MARK: finding tools
 
@@ -31,34 +32,35 @@ enum LocalServices {
     }
 
     /// Runs a tool and returns its combined output; throws with the tail of
-    /// the output if it fails, so the UI can show something actionable.
+    /// the output if it fails, so the UI can show something actionable. The
+    /// output is drained while the tool runs (brew and uv print a lot; a full
+    /// pipe would block the tool forever), off the main thread.
     @discardableResult
     static func run(_ tool: String, _ args: [String]) async throws -> String {
         guard let path = which(tool) ?? (tool.hasPrefix("/") ? tool : nil) else {
             throw Failure(message: "\(tool) isn't installed")
         }
-        return try await withCheckedThrowingContinuation { cont in
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: path)
-            p.arguments = args
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = (searchPath + [env["PATH"] ?? ""]).joined(separator: ":")
-            env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
-            p.environment = env
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = (searchPath + [env["PATH"] ?? ""]).joined(separator: ":")
+        env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+        let (status, out) = try await Task.detached { [env] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = args
+            process.environment = env
             let pipe = Pipe()
-            p.standardOutput = pipe
-            p.standardError = pipe
-            p.terminationHandler = { proc in
-                let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                if proc.terminationStatus == 0 {
-                    cont.resume(returning: out)
-                } else {
-                    let tail = out.split(separator: "\n").suffix(3).joined(separator: " ")
-                    cont.resume(throwing: Failure(message: "\(tool) \(args.first ?? "") failed: \(tail)"))
-                }
-            }
-            do { try p.run() } catch { cont.resume(throwing: error) }
+            process.standardOutput = pipe
+            process.standardError = pipe
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()  // EOF once the tool exits
+            process.waitUntilExit()
+            return (process.terminationStatus, String(bytes: data, encoding: .utf8) ?? "")
+        }.value
+        guard status == 0 else {
+            let tail = out.split(separator: "\n").suffix(3).joined(separator: " ")
+            throw Failure(message: "\(tool) \(args.first ?? "") failed: \(tail)")
         }
+        return out
     }
 
     // MARK: LiveKit (local)
@@ -72,15 +74,20 @@ enum LocalServices {
 
     static func startLiveKit() async throws {
         guard let bin = which("livekit-server") else { throw Failure(message: "LiveKit isn't installed") }
-        try await launchAgent("livekit", [bin, "--dev", "--bind", "127.0.0.1", "--node-ip", "127.0.0.1"])
+        try await launchAgent(liveKitAgent, [bin, "--dev", "--bind", "127.0.0.1", "--node-ip", "127.0.0.1"])
     }
 
     /// The dev server answers plain HTTP on its signalling port.
-    static func liveKitRunning(url: String = "http://127.0.0.1:7880") async -> Bool {
-        guard let u = URL(string: url) else { return false }
-        var req = URLRequest(url: u)
-        req.timeoutInterval = 1.5
-        return (try? await URLSession.shared.data(for: req)) != nil
+    static func liveKitRunning(url: String) async -> Bool {
+        guard let address = URL(string: url) else { return false }
+        var request = URLRequest(url: address)
+        request.timeoutInterval = 1.5
+        do {
+            _ = try await URLSession.shared.data(for: request)
+            return true
+        } catch {
+            return false  // a probe: not answering is the answer
+        }
     }
 
     // MARK: Agent Bluetooth daemon
@@ -98,7 +105,7 @@ enum LocalServices {
     static func startDaemon() async throws {
         guard let bin = which("agent-bluetooth") else { throw Failure(message: "Agent Bluetooth isn't installed") }
         try writeDefaultConfigIfMissing()
-        try await launchAgent("daemon", [bin, "serve", configFile.path])
+        try await launchAgent(daemonAgent, [bin, "serve", configFile.path])
     }
 
     /// A first config that works for most setups: first USB dongle, local
@@ -122,9 +129,9 @@ enum LocalServices {
 
         [bridge]
         adapter = "livekit"
-        url = "ws://127.0.0.1:7880"
-        api_key = "devkey"
-        api_secret = "secret"
+        url = "\(DaemonDefaults.liveKitURL)"
+        api_key = "\(DaemonDefaults.liveKitDevKey)"
+        api_secret = "\(DaemonDefaults.liveKitDevSecret)"
 
         [routing]
         answer = "on_join"
@@ -140,6 +147,9 @@ enum LocalServices {
     }
 
     // MARK: LaunchAgents
+
+    private static let daemonAgent = "daemon"
+    private static let liveKitAgent = "livekit"
 
     private static func label(_ name: String) -> String { "com.agentbluetooth.\(name)" }
 
@@ -159,9 +169,14 @@ enum LocalServices {
             "EnvironmentVariables": ["PATH": searchPath.joined(separator: ":")],
         ]
         let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
-        try data.write(to: plist)
+        try data.write(to: plist, options: .atomic)
         let domain = "gui/\(getuid())"
-        _ = try? await run("/bin/launchctl", ["bootout", "\(domain)/\(label(name))"])  // replace an older copy
+        do {
+            try await run("/bin/launchctl", ["bootout", "\(domain)/\(label(name))"])  // replace an older copy
+        } catch {
+            Log.setup.info(
+                "no older \(label(name), privacy: .public) to replace: \(error.localizedDescription, privacy: .public)")
+        }
         try await run("/bin/launchctl", ["bootstrap", domain, plist.path])
     }
 }

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from ...core.context import Context
 from ...core.events import E
+
+if TYPE_CHECKING:
+    from ...core.context import Context
 
 
 class FakeMessages:
-    simulates = {"sms"}
+    simulates: ClassVar[frozenset[str]] = frozenset({"sms"})
 
     def __init__(self, ctx: Context, cfg: dict[str, Any]) -> None:
         self.bus = ctx.bus
@@ -22,6 +24,6 @@ class FakeMessages:
         self.bus.publish(E.SMS_SENT, to=to, text=text)
 
     async def simulate(
-        self, kind: str, sender: str = "+15551234567", text: str = "Hello!", **_: Any
+        self, kind: str, sender: str = "+15551234567", text: str = "Hello!", **_: object
     ) -> None:
         self.bus.publish(E.SMS_RECEIVED, sender=sender, text=text, id="fake")

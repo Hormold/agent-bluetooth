@@ -11,17 +11,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import xml.etree.ElementTree as ET
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bumble import rfcomm
 from bumble.core import UUID
 
-from ...core.context import Context
-from ...core.events import E, Event
+from ...core.events import E
+from ...core.tasks import Tasks
 from ..bumble.obex import ObexClient, app_params
 from ..bumble.radio import BumbleRadio
 
+if TYPE_CHECKING:
+    from ...core.context import Context
+    from ...core.events import Event
+
 log = logging.getLogger(__name__)
+SEEN_MAX = 5000  # message handles remembered to skip already-delivered SMS
 MAS_UUID = UUID.from_16_bits(0x1132)
 MAS_TARGET = bytes.fromhex("bb582b40420c11dbb0de0800200c9a66")
 T_MAX_COUNT, T_SUBJECT_LEN, T_ATTACHMENT, T_CHARSET = 0x01, 0x13, 0x0A, 0x14
@@ -36,26 +41,28 @@ class BumbleMapMessages:
         # subject already holds the text for normal-length SMS.
         self.fetch_full = bool(cfg.get("fetch_full", False))
         self.obex: ObexClient | None = None
-        self._task: asyncio.Task | None = None
-        self._seen: set[str] = set()
+        self._tasks = Tasks(f"{ctx.bus.instance}:map")
+        self._task: asyncio.Task[None] | None = None  # the session with the connected phone
+        self._seen: dict[str, None] = {}  # insertion-ordered set, capped at SEEN_MAX
 
     async def start(self) -> None:
         self.radio = await BumbleRadio.shared(self.ctx)
         self.bus.subscribe(self._on_event)
 
     async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
+        self._task = None
+        await self._tasks.aclose()
 
     async def _on_event(self, event: Event) -> None:
         if event.type == E.PHONE_CONNECTED and self._task is None:
-            self._task = asyncio.create_task(self._run(event.data["address"]))
+            address = str(event.data["address"])
+            self._task = self._tasks.spawn(self._run(address), name=f"map:{address}")
         elif event.type == E.PHONE_DISCONNECTED and self._task:
             self._task.cancel()
-            self._task, self.obex = None, None
+            self._task = None
 
     async def send(self, to: str, text: str) -> None:
-        if self.obex is None:
+        if self.obex is None or self.obex.failed is not None:
             raise RuntimeError("MAP not connected")
         await self.obex.put(
             "x-bt/message",
@@ -67,48 +74,76 @@ class BumbleMapMessages:
 
     # internals -------------------------------------------------------------
     async def _run(self, address: str) -> None:
+        """The MAP session with one connected phone, until it disconnects."""
         try:
-            conn = next(
-                c
-                for c in self.radio.device.connections.values()
-                if str(c.peer_address) == address
-            )
-            channel = await rfcomm.find_rfcomm_channel_with_uuid(conn, MAS_UUID)
-            if channel is None:
-                log.warning("phone has no MAP service; SMS disabled")
-                return
-            mux = await self.radio.multiplexer(conn)
-            obex = ObexClient(await mux.open_dlc(channel))
+            obex = await self._open(address)
+        except Exception:
+            log.exception("MAP connect failed; SMS disabled until the phone reconnects")
+            self._forget_session()
+            return
+        if obex is None:
+            return
+        self.obex = obex
+        log.info("MAP connected, watching inbox")
+        try:
+            await self._watch(obex)
+        except Exception:
+            log.exception("MAP session failed; SMS disabled until the phone reconnects")
+            self._forget_session()
+        finally:
+            if self.obex is obex:  # a newer session may already be up
+                self.obex = None
+            await obex.aclose()
+
+    async def _open(self, address: str) -> ObexClient | None:
+        conn = next(
+            c for c in self.radio.device.connections.values() if str(c.peer_address) == address
+        )
+        channel = await rfcomm.find_rfcomm_channel_with_uuid(conn, MAS_UUID)
+        if channel is None:
+            log.warning("phone has no MAP service; SMS disabled")
+            return None
+        mux = await self.radio.multiplexer(conn)
+        obex = ObexClient(await mux.open_dlc(channel))
+        try:
             await obex.connect(MAS_TARGET)
             for folder in ("", "telecom", "msg"):
                 await obex.setpath(folder)
-            self.obex = obex
-            log.info("MAP connected, watching inbox")
-            first = True
-            while True:
-                await self._poll(first)
-                first = False
-                await asyncio.sleep(self.poll_every)
-        except asyncio.CancelledError:
+        except BaseException:
+            await obex.aclose()
             raise
-        except Exception:
-            log.exception("MAP session failed; SMS disabled until the phone reconnects")
+        return obex
+
+    async def _watch(self, obex: ObexClient) -> None:
+        first = True
+        while True:
+            await self._poll(obex, seed=first)
+            first = False
+            await asyncio.sleep(self.poll_every)
+
+    def _forget_session(self) -> None:
+        """The session died on its own: the next PHONE_CONNECTED starts a new one."""
+        if self._task is asyncio.current_task():
             self._task = None
 
-    async def _poll(self, seed: bool) -> None:
-        assert self.obex
+    async def _poll(self, obex: ObexClient, *, seed: bool) -> None:
         params = app_params(n=(T_MAX_COUNT, 2, 20), s=(T_SUBJECT_LEN, 1, 255))
-        listing = await self.obex.get("x-bt/MAP-msg-listing", "inbox", params)
-        for msg in ET.fromstring(listing).iter("msg"):
+        listing = await obex.get("x-bt/MAP-msg-listing", "inbox", params)
+        # The phone is the only source; expat >= 2.4.1 (3.11 ships 2.6) blocks
+        # entity-expansion bombs and ElementTree never fetches external entities.
+        root = ET.fromstring(listing)  # noqa: S314 - see above; defusedxml isn't a dependency
+        for msg in root.iter("msg"):
             handle = msg.get("handle", "")
             if handle in self._seen:
                 continue
-            self._seen.add(handle)
+            self._seen[handle] = None
+            if len(self._seen) > SEEN_MAX:  # a session can run for weeks; forget the oldest
+                del self._seen[next(iter(self._seen))]
             if seed:  # don't replay the whole inbox on startup
                 continue
             text = msg.get("subject", "")
             if self.fetch_full:
-                text = await self._fetch(handle) or text
+                text = await self._fetch(obex, handle) or text
             self.bus.publish(
                 E.SMS_RECEIVED,
                 id=handle,
@@ -119,9 +154,9 @@ class BumbleMapMessages:
                 kind=msg.get("type", ""),
             )
 
-    async def _fetch(self, handle: str) -> str:
-        assert self.obex
-        raw = await self.obex.get(
+    @staticmethod
+    async def _fetch(obex: ObexClient, handle: str) -> str:
+        raw = await obex.get(
             "x-bt/message",
             handle,
             app_params(a=(T_ATTACHMENT, 1, 0), c=(T_CHARSET, 1, 1)),

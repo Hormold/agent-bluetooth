@@ -136,7 +136,7 @@ happens when someone calls.
 
 ## Docs
 
-[Setup](docs/SETUP.md) · [LiveKit](docs/LIVEKIT.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
+[Setup](docs/SETUP.md) · [LiveKit](docs/LIVEKIT.md) · [Many phones](docs/FARM.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
 Inspired by an idea from [Grigory Bakunov (@bobuk)](https://github.com/bobuk).
 

@@ -36,9 +36,12 @@ targets:
         com.apple.security.cs.disable-library-validation: true  # load LiveKit's prebuilt (LiveKit-signed) WebRTC framework
     settings:
       base:
-        MARKETING_VERSION: "0.1.1"
+        MARKETING_VERSION: "0.2.0"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CURRENT_PROJECT_VERSION: "2"
-        SWIFT_VERSION: "5.9"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete  # implied by Swift 6; explicit so a downgrade can't drop it
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: true
+        GCC_TREAT_WARNINGS_AS_ERRORS: true
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: true

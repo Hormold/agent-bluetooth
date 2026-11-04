@@ -1,5 +1,7 @@
 """Practical recipes printed by agent-bluetooth guide."""
 
+from __future__ import annotations
+
 GUIDE = r"""
 Drive the running daemon. Global options go BEFORE the command:
   agent-bluetooth --host http://127.0.0.1:8080 --key TOKEN status
@@ -80,6 +82,8 @@ When a command fails:
   agent-bluetooth logs -n 100
 Check phone.connected, active calls, events and logs before retrying. An accepted
 call request is not proof of an answer; call.active is the connection event.
+A dial the phone refuses arrives as call.failed (same request_id as the call reply).
+answer/hangup/dtmf/volume exit 1 when the phone refused (502) or didn't reply (504).
 
 Fake adapters only:
   agent-bluetooth sim sms sender=+15551234567 text=Hello
