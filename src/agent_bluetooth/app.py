@@ -7,7 +7,7 @@ import logging
 import signal
 from typing import TYPE_CHECKING, Any
 
-from . import registry
+from . import log_setup, registry
 from .adapters.audio.kit import WavKit
 from .api.http import HttpApi
 from .config import load_config
@@ -127,22 +127,7 @@ class App:
 
 def run_config(config_path: str, instance: str | None = None, *, verbose: bool = False) -> None:
     config = load_config(config_path, instance)  # before logging: the prefix is its name
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format=f"%(asctime)s %(levelname).1s [{config['instance']['name']}] %(name)s: %(message)s",
-    )
-    # Bumble logs every HCI/SCO packet at DEBUG. With a live SCO (voice) link
-    # that's thousands of lines/sec — it pegs the CPU and journald on a small
-    # SBC and starves the event loop, dropping the very call it's logging. Keep
-    # these at INFO even under -v; our own loggers still honour verbose.
-    for noisy in (
-        "bumble.host",
-        "bumble.transport.usb",
-        "bumble.hci",
-        "bumble.rfcomm",
-        "bumble.l2cap",
-    ):
-        logging.getLogger(noisy).setLevel(logging.INFO)
+    log_setup.configure(config["instance"]["name"], verbose=verbose)
     log.info(
         "instance %s, state in %s", config["instance"]["name"], config["instance"]["state_dir"]
     )

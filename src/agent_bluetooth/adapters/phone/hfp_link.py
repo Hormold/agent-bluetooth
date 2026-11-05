@@ -76,6 +76,9 @@ class LinkSupervisor:
         self._lost_at: float | None = None
         self._cind_failures = 0
         self._hci_failures = 0
+        # Last reconnect failure logged per bonded phone: a phone that left the
+        # room fails every page the same way, and one line about it is enough.
+        self._unreachable: dict[str, str] = {}
         self._tasks = Tasks("hfp-link")
 
     def start(self) -> None:
@@ -146,11 +149,25 @@ class LinkSupervisor:
                 return
             try:
                 await self._try_reconnect(address)
-            except TimeoutError:
-                log.info("reconnect to %s timed out", address)
             except Exception as e:  # the reconnect loop must survive any link failure
-                log.info("reconnect to %s failed: %s", address, e)
                 log.debug("reconnect to %s traceback", address, exc_info=True)
+                self._note_reconnect_failure(address, e)
+
+    def _note_reconnect_failure(self, address: str, error: Exception) -> None:
+        """INFO when a phone's reconnect failure is new or CHANGED (out of range,
+        then bad keys or a broken HFP setup, must stay visible); the same failure
+        again goes to DEBUG until the phone connects."""
+        reason = (
+            "timed out" if isinstance(error, TimeoutError) else str(error) or type(error).__name__
+        )
+        if self._unreachable.get(address) == reason:
+            log.debug("reconnect to %s failed again: %s", address, reason)
+            return
+        self._unreachable[address] = reason
+        if isinstance(error, TimeoutError) or "PAGE_TIMEOUT" in reason:
+            log.info("phone %s out of reach (%s); still listening for it", address, reason)
+        else:
+            log.warning("reconnect to %s failed: %s", address, reason)
 
     async def _try_reconnect(self, address: str) -> None:
         # Short timeout only for paging (keeps the radio free to accept the
@@ -175,7 +192,7 @@ class LinkSupervisor:
         hf = hfp.HfProtocol(dlc, self.config)
         conn.on("sco_request", functools.partial(self.audio.on_sco_request, conn))
         conn.on("sco_connection", self.audio.on_sco)
-        conn.on(conn.EVENT_DISCONNECTION, self.on_disconnect)
+        conn.on(conn.EVENT_DISCONNECTION, functools.partial(self._on_connection_lost, conn))
         await self._disable_sniff(conn)
         hf.on(
             hf.EVENT_AG_INDICATOR,
@@ -197,6 +214,7 @@ class LinkSupervisor:
         if name:
             radio.peer_names[address] = name
         self._lost_at = None
+        self._unreachable.pop(address, None)
         self.bus.publish(
             E.PHONE_CONNECTED,
             address=address,
@@ -259,7 +277,13 @@ class LinkSupervisor:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(conn.disconnect(), timeout=4)
 
-    def on_disconnect(self, *_: object) -> None:
+    def _on_connection_lost(self, conn: Connection, *_: object) -> None:
+        """ACL went down. Ignore a stale one (already recycled, or replaced by a
+        newer link) so each loss is reported exactly once."""
+        if conn is self.connection:
+            self.on_disconnect()
+
+    def on_disconnect(self) -> None:
         if self.commands.hf is not None and self._lost_at is None:
             self._lost_at = asyncio.get_running_loop().time()
         self.commands.hf = None

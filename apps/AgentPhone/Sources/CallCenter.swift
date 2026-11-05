@@ -6,7 +6,10 @@ import SwiftUI
 /// (answer = join the call's LiveKit room; the daemon picks up on join).
 @MainActor
 final class CallCenter: ObservableObject {
-    private static let pollInterval = Duration.seconds(5)
+    /// Status polling is only a safety net: phone and call changes arrive over
+    /// SSE and trigger a refresh. Poll fast only while that stream is down.
+    private static let pollWhileStreamDown = Duration.seconds(5)
+    private static let pollWhileStreamUp = Duration.seconds(30)
     private static let activityLimit = 200
     private static let macIdentity = "mac"
 
@@ -47,6 +50,7 @@ final class CallCenter: ObservableObject {
     private var api: APIClient
     private var stream: EventStream?
     private var poll: Task<Void, Never>?
+    private var streamUp = false
     private var contactIndex: PhoneBookIndex?
 
     init() {
@@ -69,9 +73,18 @@ final class CallCenter: ObservableObject {
         alert.onAnswer = { [weak self] in self?.answer() }
         alert.onDecline = { [weak self] in self?.hangup() }
         reconnect()
+        restartPolling()
+    }
+
+    /// (Re)start the status poll at the pace the stream's state calls for, so a
+    /// dropped stream gets the fast pace now, not after a 30 s sleep.
+    private func restartPolling() {
+        poll?.cancel()
+        let interval = streamUp ? Self.pollWhileStreamUp : Self.pollWhileStreamDown
         poll = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: Self.pollInterval)  // cancellation ends the loop on the next check
+                try? await Task.sleep(for: interval)  // cancellation ends the loop on the next check
+                guard !Task.isCancelled else { return }
                 await self?.refresh()
             }
         }
@@ -84,7 +97,13 @@ final class CallCenter: ObservableObject {
         let events = EventStream(
             url: api.eventsURL,
             onEvent: { [weak self] event in self?.handle(event) },
-            onConnection: { [weak self] online in self?.daemonOnline = online })
+            onConnection: { [weak self] online in
+                guard let self else { return }
+                daemonOnline = online
+                guard streamUp != online else { return }
+                streamUp = online
+                restartPolling()
+            })
         events.start()
         stream = events
         Task { await refresh() }

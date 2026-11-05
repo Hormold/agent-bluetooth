@@ -1,6 +1,6 @@
 [project]
 name = "agent-bluetooth"
-version = "0.2.0"
+version = "0.2.1"
 description = "Let your AI agent make and take calls on your real phone, over a USB Bluetooth dongle and LiveKit"
 readme = "README.md"
 license = "MIT"

@@ -140,9 +140,6 @@ enum LocalServices {
         host = "127.0.0.1"
         port = 8080
 
-        [[sinks]]
-        adapter = "log"
-
         """.write(to: configFile, atomically: true, encoding: .utf8)
     }
 
