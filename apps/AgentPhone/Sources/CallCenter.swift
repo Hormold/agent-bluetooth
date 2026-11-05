@@ -73,10 +73,18 @@ final class CallCenter: ObservableObject {
         alert.onAnswer = { [weak self] in self?.answer() }
         alert.onDecline = { [weak self] in self?.hangup() }
         reconnect()
+        restartPolling()
+    }
+
+    /// (Re)start the status poll at the pace the stream's state calls for, so a
+    /// dropped stream gets the fast pace now, not after a 30 s sleep.
+    private func restartPolling() {
+        poll?.cancel()
+        let interval = streamUp ? Self.pollWhileStreamUp : Self.pollWhileStreamDown
         poll = Task { [weak self] in
             while !Task.isCancelled {
-                let interval = self?.streamUp == true ? Self.pollWhileStreamUp : Self.pollWhileStreamDown
                 try? await Task.sleep(for: interval)  // cancellation ends the loop on the next check
+                guard !Task.isCancelled else { return }
                 await self?.refresh()
             }
         }
@@ -90,8 +98,11 @@ final class CallCenter: ObservableObject {
             url: api.eventsURL,
             onEvent: { [weak self] event in self?.handle(event) },
             onConnection: { [weak self] online in
-                self?.streamUp = online
-                self?.daemonOnline = online
+                guard let self else { return }
+                daemonOnline = online
+                guard streamUp != online else { return }
+                streamUp = online
+                restartPolling()
             })
         events.start()
         stream = events

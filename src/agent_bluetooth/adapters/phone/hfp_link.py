@@ -76,9 +76,9 @@ class LinkSupervisor:
         self._lost_at: float | None = None
         self._cind_failures = 0
         self._hci_failures = 0
-        # Bonded phones we already said are out of reach: a phone that left the
-        # room fails every page, and one line about it is enough.
-        self._unreachable: set[str] = set()
+        # Last reconnect failure logged per bonded phone: a phone that left the
+        # room fails every page the same way, and one line about it is enough.
+        self._unreachable: dict[str, str] = {}
         self._tasks = Tasks("hfp-link")
 
     def start(self) -> None:
@@ -151,18 +151,23 @@ class LinkSupervisor:
                 await self._try_reconnect(address)
             except Exception as e:  # the reconnect loop must survive any link failure
                 log.debug("reconnect to %s traceback", address, exc_info=True)
-                self._note_unreachable(address, e)
+                self._note_reconnect_failure(address, e)
 
-    def _note_unreachable(self, address: str, error: Exception) -> None:
-        """Log the first failed page of a phone; repeats go to DEBUG until it is back."""
+    def _note_reconnect_failure(self, address: str, error: Exception) -> None:
+        """INFO when a phone's reconnect failure is new or CHANGED (out of range,
+        then bad keys or a broken HFP setup, must stay visible); the same failure
+        again goes to DEBUG until the phone connects."""
         reason = (
             "timed out" if isinstance(error, TimeoutError) else str(error) or type(error).__name__
         )
-        if address in self._unreachable:
+        if self._unreachable.get(address) == reason:
             log.debug("reconnect to %s failed again: %s", address, reason)
             return
-        self._unreachable.add(address)
-        log.info("phone %s out of reach (%s); still listening for it", address, reason)
+        self._unreachable[address] = reason
+        if isinstance(error, TimeoutError) or "PAGE_TIMEOUT" in reason:
+            log.info("phone %s out of reach (%s); still listening for it", address, reason)
+        else:
+            log.warning("reconnect to %s failed: %s", address, reason)
 
     async def _try_reconnect(self, address: str) -> None:
         # Short timeout only for paging (keeps the radio free to accept the
@@ -187,7 +192,7 @@ class LinkSupervisor:
         hf = hfp.HfProtocol(dlc, self.config)
         conn.on("sco_request", functools.partial(self.audio.on_sco_request, conn))
         conn.on("sco_connection", self.audio.on_sco)
-        conn.on(conn.EVENT_DISCONNECTION, self.on_disconnect)
+        conn.on(conn.EVENT_DISCONNECTION, functools.partial(self._on_connection_lost, conn))
         await self._disable_sniff(conn)
         hf.on(
             hf.EVENT_AG_INDICATOR,
@@ -209,7 +214,7 @@ class LinkSupervisor:
         if name:
             radio.peer_names[address] = name
         self._lost_at = None
-        self._unreachable.discard(address)
+        self._unreachable.pop(address, None)
         self.bus.publish(
             E.PHONE_CONNECTED,
             address=address,
