@@ -76,6 +76,9 @@ class LinkSupervisor:
         self._lost_at: float | None = None
         self._cind_failures = 0
         self._hci_failures = 0
+        # Bonded phones we already said are out of reach: a phone that left the
+        # room fails every page, and one line about it is enough.
+        self._unreachable: set[str] = set()
         self._tasks = Tasks("hfp-link")
 
     def start(self) -> None:
@@ -146,11 +149,20 @@ class LinkSupervisor:
                 return
             try:
                 await self._try_reconnect(address)
-            except TimeoutError:
-                log.info("reconnect to %s timed out", address)
             except Exception as e:  # the reconnect loop must survive any link failure
-                log.info("reconnect to %s failed: %s", address, e)
                 log.debug("reconnect to %s traceback", address, exc_info=True)
+                self._note_unreachable(address, e)
+
+    def _note_unreachable(self, address: str, error: Exception) -> None:
+        """Log the first failed page of a phone; repeats go to DEBUG until it is back."""
+        reason = (
+            "timed out" if isinstance(error, TimeoutError) else str(error) or type(error).__name__
+        )
+        if address in self._unreachable:
+            log.debug("reconnect to %s failed again: %s", address, reason)
+            return
+        self._unreachable.add(address)
+        log.info("phone %s out of reach (%s); still listening for it", address, reason)
 
     async def _try_reconnect(self, address: str) -> None:
         # Short timeout only for paging (keeps the radio free to accept the
@@ -197,6 +209,7 @@ class LinkSupervisor:
         if name:
             radio.peer_names[address] = name
         self._lost_at = None
+        self._unreachable.discard(address)
         self.bus.publish(
             E.PHONE_CONNECTED,
             address=address,
@@ -259,7 +272,13 @@ class LinkSupervisor:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(conn.disconnect(), timeout=4)
 
-    def on_disconnect(self, *_: object) -> None:
+    def _on_connection_lost(self, conn: Connection, *_: object) -> None:
+        """ACL went down. Ignore a stale one (already recycled, or replaced by a
+        newer link) so each loss is reported exactly once."""
+        if conn is self.connection:
+            self.on_disconnect()
+
+    def on_disconnect(self) -> None:
         if self.commands.hf is not None and self._lost_at is None:
             self._lost_at = asyncio.get_running_loop().time()
         self.commands.hf = None

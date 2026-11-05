@@ -6,7 +6,10 @@ import SwiftUI
 /// (answer = join the call's LiveKit room; the daemon picks up on join).
 @MainActor
 final class CallCenter: ObservableObject {
-    private static let pollInterval = Duration.seconds(5)
+    /// Status polling is only a safety net: phone and call changes arrive over
+    /// SSE and trigger a refresh. Poll fast only while that stream is down.
+    private static let pollWhileStreamDown = Duration.seconds(5)
+    private static let pollWhileStreamUp = Duration.seconds(30)
     private static let activityLimit = 200
     private static let macIdentity = "mac"
 
@@ -47,6 +50,7 @@ final class CallCenter: ObservableObject {
     private var api: APIClient
     private var stream: EventStream?
     private var poll: Task<Void, Never>?
+    private var streamUp = false
     private var contactIndex: PhoneBookIndex?
 
     init() {
@@ -71,7 +75,8 @@ final class CallCenter: ObservableObject {
         reconnect()
         poll = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: Self.pollInterval)  // cancellation ends the loop on the next check
+                let interval = self?.streamUp == true ? Self.pollWhileStreamUp : Self.pollWhileStreamDown
+                try? await Task.sleep(for: interval)  // cancellation ends the loop on the next check
                 await self?.refresh()
             }
         }
@@ -84,7 +89,10 @@ final class CallCenter: ObservableObject {
         let events = EventStream(
             url: api.eventsURL,
             onEvent: { [weak self] event in self?.handle(event) },
-            onConnection: { [weak self] online in self?.daemonOnline = online })
+            onConnection: { [weak self] online in
+                self?.streamUp = online
+                self?.daemonOnline = online
+            })
         events.start()
         stream = events
         Task { await refresh() }

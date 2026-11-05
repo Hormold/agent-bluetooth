@@ -2,6 +2,27 @@
 
 Versions cover the daemon, the CLI and the Agent Phone macOS app together.
 
+## 0.2.1 (2026-11-05)
+
+### Fixed
+
+- **Quiet, readable daemon log.** INFO now means something happened: a phone
+  came or went, a call, a sync, an error. Gone: one access-log line per HTTP
+  request (the app's status poll wrote ~17k a day), signal-bar ticks
+  (`phone.status` is DEBUG; still on the bus and in `watch`), Bumble's feature
+  dump on every reconnect and its "unhandled unsolicited response" lines, the
+  LiveKit SDK's connect/disconnect echo and its false `'_data_track' closed
+  unexpectedly` ERROR on every room join. `-v` brings the details back.
+- **A phone out of range is logged once**, not on every 25 s page attempt
+  ("phone … out of reach; still listening for it"); the next connect resets it.
+- **One `phone.disconnected` per drop.** Recycling a dead link and the ACL
+  going down no longer both report it; a stale link's disconnect is ignored.
+- **Agent Phone:** the greeting file can be chosen right under *Numbers not in
+  your contacts → Play a greeting*, not only from the top card. Status polling
+  drops to every 30 s while the live event stream is up (5 s while it's down).
+  New setups no longer add the `log` sink, which duplicated every event line
+  in `daemon.log`; the `log` sink also skips `phone.status` unless asked.
+
 ## 0.2.0 (2026-11-04)
 
 ### Breaking

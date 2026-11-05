@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from .events import Event
+from .events import E, Event
 from .tasks import Tasks
 
 if TYPE_CHECKING:
@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 Handler = Callable[[Event], Awaitable[None]]
+# Telemetry, not news: signal/battery/volume tick all day. Still on the bus and
+# in `watch`; only the log line drops to DEBUG.
+QUIET_EVENTS = frozenset({E.PHONE_STATUS})
 
 
 class EventBus:
@@ -33,7 +36,9 @@ class EventBus:
     def publish(self, type_: str, **data: object) -> Event:
         event = Event(type_, data, instance=self.instance)
         self.history.append(event)
-        log.info("event %s %s", type_, data)
+        log.log(
+            logging.DEBUG if type_ in QUIET_EVENTS else logging.INFO, "event %s %s", type_, data
+        )
         for handler in self._handlers:
             self.tasks.spawn(self._safe(handler, event), name=f"bus:{type_}")
         for queue in self._queues:

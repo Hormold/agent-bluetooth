@@ -6,6 +6,8 @@ import json
 import sys
 from typing import TYPE_CHECKING, Any
 
+from ...core.bus import QUIET_EVENTS
+
 if TYPE_CHECKING:
     from ...core.context import Context
     from ...core.events import Event
@@ -13,9 +15,9 @@ if TYPE_CHECKING:
 
 class LogSink:
     def __init__(self, ctx: Context, cfg: dict[str, Any]) -> None:
-        self.events: set[str] = set(cfg.get("events", []))  # empty = all
+        self.events: set[str] = set(cfg.get("events", []))  # empty = all but telemetry
 
     async def handle(self, event: Event) -> None:
-        if not self.events or event.type in self.events:
+        if event.type in self.events or (not self.events and event.type not in QUIET_EVENTS):
             sys.stdout.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
             sys.stdout.flush()

@@ -47,12 +47,7 @@ struct SettingsView: View {
                 if option.id == "agent", form.mode == "agent" {
                     InlineField(label: "Agent name", text: $form.agentName, placeholder: "phone-agent", onSubmit: save)
                 }
-                if option.id == "play", form.mode == "play" {
-                    ValueRow(
-                        symbol: "waveform", title: "Greeting",
-                        value: form.playFile.isEmpty ? "Choose\u{2026}" : PathText.name(form.playFile),
-                        action: chooseGreeting)
-                }
+                if option.id == "play", form.mode == "play" { greetingRow }
                 if index < SettingsOption.modes.count - 1 { CardDivider() }
             }
         }
@@ -65,6 +60,9 @@ struct SettingsView: View {
                     form.unknown = option.id
                     save()
                 }
+                // One greeting file serves both cards; show its picker here
+                // unless the card above already does.
+                if option.id == "play", form.unknown == "play", form.mode != "play" { greetingRow }
                 if option.id == "stall", form.unknown == "stall" {
                     ValueRow(
                         symbol: "folder", title: "Phrases",
@@ -74,14 +72,21 @@ struct SettingsView: View {
                 if index < SettingsOption.strangers.count - 1 { CardDivider() }
             }
         } footer: {
-            if form.unknown == "play", form.playFile.isEmpty {
-                Text("Choose a greeting above first.").foregroundStyle(.orange)
+            if form.unknown == "play", form.mode == "play" {
+                Text("Plays the same greeting as above.")
             } else if form.unknown == "stall" {
                 Text(
                     "Record a few short phrases in your own voice: "
                         + "\u{201C}Hello?\u{201D}, \u{201C}Sorry, can you repeat that?\u{201D}")
             }
         }
+    }
+
+    private var greetingRow: some View {
+        ValueRow(
+            symbol: "waveform", title: "Greeting",
+            value: form.playFile.isEmpty ? "Choose\u{2026}" : PathText.name(form.playFile),
+            action: chooseGreeting)
     }
 
     /// The box runs on this Mac: its folders are ours to pick and open.
@@ -228,7 +233,9 @@ struct SettingsOption: Identifiable {
 
     static let strangers = [
         Self(id: "same", title: "Same as everyone", detail: "Use the option above.", symbol: "person.2"),
-        Self(id: "play", title: "Play the greeting", detail: "Answer, play it, hang up.", symbol: "play.circle"),
+        Self(
+            id: "play", title: "Play a greeting", detail: "Answers, plays your recording, hangs up.",
+            symbol: "play.circle"),
         Self(
             id: "stall", title: "Keep them busy", detail: "Recorded phrases between their replies, a few minutes.",
             symbol: "hourglass"),
