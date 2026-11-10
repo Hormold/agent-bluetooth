@@ -27,6 +27,8 @@ struct ContentView: View {
             .animation(.easeOut(duration: 0.22), value: center.call?.state)
             .animation(.easeOut(duration: 0.22), value: center.setupStep)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .top) { AttentionOverlay(live: center.live) }
+            .animation(.easeOut(duration: 0.2), value: center.attention)
         }
         .background(.background)
         .ignoresSafeArea(.container, edges: .top)  // header shares the titlebar row

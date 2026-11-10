@@ -8,6 +8,7 @@ final class LiveKitRoom: ObservableObject {
     @Published var joined = false
     private(set) var joining = false  // set before any await: blocks a second join
     @Published var muted = false
+    @Published var listening = true  // the call's audio plays here
     @Published var remoteLevel: Float = 0
     @Published var stats = WebRTCStats()
 
@@ -16,7 +17,9 @@ final class LiveKitRoom: ObservableObject {
     private var room: Room?
     private var meter: Task<Void, Never>?
 
-    func join(url: String, token: String) async throws {
+    /// `mic: false` joins as a listener (an agent's call): you hear it, the
+    /// line doesn't hear you until you turn the mic on.
+    func join(url: String, token: String, mic: Bool) async throws {
         guard !joining, !joined else { return }
         joining = true
         defer { joining = false }
@@ -24,9 +27,10 @@ final class LiveKitRoom: ObservableObject {
         let newRoom = Room(roomOptions: RoomOptions(reportRemoteTrackStatistics: true))
         room = newRoom
         try await newRoom.connect(url: url, token: token)
-        try await newRoom.localParticipant.setMicrophone(enabled: true)
+        try await newRoom.localParticipant.setMicrophone(enabled: mic)
         joined = true
-        muted = false
+        muted = !mic
+        listening = true
         startLevelMeter()
     }
 
@@ -48,6 +52,17 @@ final class LiveKitRoom: ObservableObject {
         guard let room else { return }
         try await room.localParticipant.setMicrophone(enabled: muted)
         muted.toggle()
+    }
+
+    /// Hear the call or not: subscribes to / drops the remote audio.
+    func setListening(_ enabled: Bool) async throws {
+        guard let room else { return }
+        for participant in room.remoteParticipants.values {
+            for publication in participant.audioTracks {
+                try await (publication as? RemoteTrackPublication)?.set(enabled: enabled)
+            }
+        }
+        listening = enabled
     }
 
     func leave() async {

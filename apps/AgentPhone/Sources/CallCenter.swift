@@ -11,7 +11,7 @@ final class CallCenter: ObservableObject {
     private static let pollWhileStreamDown = Duration.seconds(5)
     private static let pollWhileStreamUp = Duration.seconds(30)
     private static let activityLimit = 200
-    private static let macIdentity = "mac"
+    static let macIdentity = "mac"
 
     @Published var phone = Phone(connected: false)
     @Published var call: Call? {
@@ -47,7 +47,15 @@ final class CallCenter: ObservableObject {
     let live = LiveKitRoom()
     let readiness = Readiness()
     private let alert = IncomingCallAlert()
-    private var api: APIClient
+    private let attentionAlert = AttentionAlert()
+    /// The agent on the call needs you now; drives the red banner and the alert.
+    @Published var attention: CallAttention? {
+        didSet {
+            if let attention, attention != oldValue { attentionAlert.start(attention) }
+            if attention == nil { attentionAlert.stop() }
+        }
+    }
+    private(set) var api: APIClient
     private var stream: EventStream?
     private var poll: Task<Void, Never>?
     private var streamUp = false
@@ -255,16 +263,25 @@ extension CallCenter {
             Task { await refresh() }
         case EventType.directorySynced:
             loadDirectory()
+        case EventType.callAttention:
+            switch event.str("kind") {
+            case "person": attention = CallAttention(kind: .person, text: event.str("text") ?? "")
+            case "question": attention = CallAttention(kind: .question, text: event.str("text") ?? "")
+            default: attention = nil
+            }
         default:
             break  // unknown or informational: shown in Activity only
         }
     }
 
-    /// Call events carry the phone's record, whose room is always empty; keep
-    /// the room the box already told us about.
+    /// Call events carry the phone's record, whose room and agent are always
+    /// empty; keep what the box already told us about this call.
     private func updateCall(_ update: Call) {
         var update = update
-        if update.room == nil, let current = call, current.id == update.id { update.room = current.room }
+        if let current = call, current.id == update.id {
+            if update.room == nil { update.room = current.room }
+            if update.agentName.isEmpty { update.agentName = current.agentName }
+        }
         call = update
     }
 
@@ -272,10 +289,14 @@ extension CallCenter {
         guard let room = event.str("room"), !room.isEmpty else { return }
         if let id = event.callID, let current = call, current.id != id { return }  // another call's room
         call?.room = room
-        // Outbound calls: join the room automatically so you can talk.
+        if let agent = event.str("agent_name"), !agent.isEmpty { call?.agentName = agent }
+        // Outbound calls you placed: join the room automatically so you can talk.
+        // An agent's call: join as a listener (mic off), so you always hear it.
         // Incoming calls wait for the Answer tap.
-        if event.str("direction") == "out" || call?.direction == "out" {
-            run { try await self.joinRoom(room) }
+        if call?.hasAgent == true {
+            run { try await self.joinRoom(room, mic: false) }
+        } else if event.str("direction") == "out" || call?.direction == "out" {
+            run { try await self.joinRoom(room, mic: true) }
         }
     }
 
@@ -290,83 +311,8 @@ extension CallCenter {
 
     private func endCall() {
         call = nil
+        attention = nil
         Task { await live.leave() }
-    }
-}
-
-// MARK: - Actions
-
-extension CallCenter {
-    func dial(_ number: String) {
-        let trimmed = number.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        run { try await self.api.dial(trimmed) }
-    }
-
-    func answer() {
-        guard let call else { return }
-        run {
-            let room = try await self.resolveRoom(call)
-            try await self.joinRoom(room)
-        }
-    }
-
-    /// Join a LiveKit room by name (fetch a token, connect, publish mic).
-    private func joinRoom(_ room: String) async throws {
-        guard !live.joined, !live.joining else { return }
-        let info = try await api.token(room: room, identity: Self.macIdentity)
-        try await live.join(url: info.url, token: info.token)
-    }
-
-    /// In the room: native LiveKit DTMF (the box relays it to the phone, like a
-    /// SIP trunk). Not in the room: straight to the box API.
-    func sendDTMF(_ digit: String) {
-        run {
-            if self.live.joined { try await self.live.publishDTMF(digit) } else { try await self.api.dtmf(digit) }
-        }
-    }
-
-    func hangup() {
-        run {
-            try await self.api.hangup()
-            await self.live.leave()
-        }
-    }
-
-    func toggleMute() { run { try await self.live.toggleMute() } }
-
-    private func resolveRoom(_ call: Call) async throws -> String {
-        if let room = call.room { return room }
-        // The box opens the room a moment after the call appears: wait for it.
-        for _ in 0..<10 {
-            let status = try await api.status()
-            if let room = status.calls.first(where: { $0.id == call.id })?.room { return room }
-            try await Task.sleep(for: .milliseconds(300))
-        }
-        throw APIError.server(status: 0, message: "room not ready")
-    }
-
-    /// Run a user action; a failure shows up in the error banner.
-    private func run(_ operation: @escaping @MainActor () async throws -> Void) {
-        Task {
-            do {
-                try await operation()
-            } catch {
-                self.error = error.localizedDescription
-            }
-        }
-    }
-
-    /// A background refresh: failures are logged, not shown, and read as nil.
-    nonisolated private static func quietly<T: Sendable>(
-        _ what: String, _ operation: @Sendable () async throws -> T
-    ) async -> T? {
-        do {
-            return try await operation()
-        } catch {
-            Log.api.info("\(what, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return nil
-        }
     }
 }
 

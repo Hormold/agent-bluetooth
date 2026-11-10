@@ -94,6 +94,11 @@ class HfpCommands:
     async def set_volume(self, level: int) -> None:
         await self._send("volume", f"AT+VGS={max(0, min(VOLUME_MAX, level))}")
 
+    async def assistant(self, *, on: bool) -> None:
+        # The headset's assistant button (HFP 4.25): the phone wakes Siri /
+        # Google Assistant and opens the audio link to us, with no call.
+        await self._send("assistant", f"AT+BVRA={int(on)}")
+
     # polls: best effort, None on any failure -----------------------------
     async def read_indicators(self) -> list[int] | None:
         """AT+CIND? values in hf.ag_indicators order; None = missed heartbeat."""

@@ -57,11 +57,12 @@ class App:
             audio=WavKit(self.ctx.bus),
             directory=self.directory,
         )
+        # Before saved settings: they carry runtime automations for this engine.
+        self.automations = AutomationEngine(self.ctx, build_actions(self))
         self.settings = SettingsStore(config["settings_file"])
         saved = self.settings.load()
         if saved:
             settings_apply(self, saved)
-        self.automations = AutomationEngine(self.ctx, build_actions(self))
         self.api = HttpApi(self, config.get("http", {}))
 
     def components(self) -> list[Component]:

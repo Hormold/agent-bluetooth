@@ -42,6 +42,7 @@ SIP_STATUS_BY_STATE = {
     "ended": "hangup",
 }
 UPLINK_PREBUFFER_MS = 120
+OWNER_TOPIC = "owner"  # data messages from the owner to the agents in the room
 LK_RATE = 48000  # what LiveKit/WebRTC run at natively
 LK_FRAME = LK_RATE // 100  # 10 ms
 
@@ -111,6 +112,15 @@ class LiveKitBridge:
             api.VideoGrants(room_join=True, room=room, can_publish=True, can_subscribe=True)
         )
         return {"url": self.client_url, "room": room, "token": token.to_jwt()}
+
+    async def say(self, call: Call, text: str) -> None:
+        """A line from the owner for the agent, as a reliable data message on
+        topic "owner" from the phone participant; the agent speaks it."""
+        s = self.sessions.get(call.id)
+        if s is None or not s.connected.is_set():
+            raise RuntimeError(f"call {call.id} is not in a room")
+        payload = json.dumps({"text": text, "call_id": call.id}).encode()
+        await s.room.local_participant.publish_data(payload, reliable=True, topic=OWNER_TOPIC)
 
     async def open(self, call: Call, *, agent_name: str = "") -> dict[str, Any]:
         digits = re.sub(r"\D", "", call.number)[-10:] or "unknown"

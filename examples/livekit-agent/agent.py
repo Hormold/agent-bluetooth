@@ -11,7 +11,17 @@ telephony agent, following LiveKit's outbound-calls guide:
   CreateSIPParticipant), waits for sip.callStatus == "active", lets the other
   side speak first, and works on the task.
 
-Every call's transcript is written to ./calls/<room>.json when the call ends.
+While the call runs, the owner can step in:
+
+- `agent-bluetooth say "..."`: a data message on topic "owner"; the agent
+  stops what it was saying and says that instead, in its own voice.
+- Joining the room (the Mac app's Take over, or `agent-bluetooth join`): the
+  agent announces the owner and goes quiet; when the owner leaves, it picks
+  the call back up.
+
+When the call ends, the transcript is written to ./calls/<room>.json and a
+one-line outcome is posted to the daemon as a call.summary event, which its
+sinks (Telegram, webhook) and automations deliver.
 """
 
 from __future__ import annotations
@@ -22,10 +32,11 @@ import logging
 import os
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 from dotenv import load_dotenv
+from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentServer,
@@ -38,22 +49,21 @@ from livekit.agents.beta.tools import EndCallTool
 from livekit.plugins import openai
 
 if TYPE_CHECKING:
-    from livekit import rtc
-    from livekit.agents import (
-        JobContext,
-    )
+    from livekit.agents import JobContext
 
 load_dotenv()
 log = logging.getLogger("phone-agent")
 
 AGENT_NAME = "phone-agent"
 PHONE = "phone"  # identity of the handset in every call room
+OWNER_TOPIC = "owner"  # data messages from `agent-bluetooth say`
 DAEMON = os.getenv("AGENT_BLUETOOTH_URL", "http://127.0.0.1:8080")
 OWNER = os.getenv("OWNER_NAME", "the owner")
+SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "gpt-5.2")
 ANSWER_TIMEOUT = 60  # seconds of ringing before giving up
 TRANSCRIPTS = Path("calls")
 
-_DTMF = {str(n): n for n in range(10)} | {
+DTMF = {str(n): n for n in range(10)} | {
     "*": 10,
     "#": 11,
     "A": 12,
@@ -119,13 +129,46 @@ class PhoneAgent(Agent):
             digits: Keys in order. Allowed: 0-9, * and #.
         """
         keys = digits.strip().upper()
-        if not keys or any(k not in _DTMF for k in keys):
+        if not keys or any(k not in DTMF for k in keys):
             return f"Nothing pressed: use only 0-9, * or #. Got {digits!r}."
         room = get_job_context().room
         for key in keys:
-            await room.local_participant.publish_dtmf(code=_DTMF[key], digit=key)
+            await room.local_participant.publish_dtmf(code=DTMF[key], digit=key)
             await asyncio.sleep(0.3)
         return f"Pressed {keys}."
+
+    # the owner steps in ----------------------------------------------------
+    def owner_says(self, text: str) -> None:
+        """`agent-bluetooth say`: drop the current sentence, say this instead."""
+        log.info("owner says: %s", text)
+        self.session.interrupt()
+        self.session.generate_reply(
+            instructions=(
+                f'{OWNER} just told you: "{text}". Act on it right now: say it to the '
+                "person on the line in your own words, in the first person, as if you had "
+                "meant to all along. Do not mention that you were told or that anyone is typing."
+            )
+        )
+
+    async def owner_joined(self) -> None:
+        """The owner is in the room: introduce them, then stay out of the way."""
+        log.info("owner joined the call; handing over")
+        self.session.interrupt()
+        # generate_reply, not say(): a realtime model has no separate TTS to say() with
+        handle = self.session.generate_reply(
+            instructions=f"Say only: one moment, {OWNER} is joining the call now."
+        )
+        await handle
+        self.session.input.set_audio_enabled(False)
+        self.session.output.set_audio_enabled(False)
+
+    def owner_left(self) -> None:
+        log.info("owner left the call; taking it back")
+        self.session.input.set_audio_enabled(True)
+        self.session.output.set_audio_enabled(True)
+        self.session.generate_reply(
+            instructions=f"{OWNER} has left the call. Say you're back and carry on."
+        )
 
 
 async def place_call(room: str, number: str) -> None:
@@ -159,27 +202,105 @@ async def wait_until_answered(ctx: JobContext) -> bool:
     return current == "active"
 
 
-def save_transcript(ctx: JobContext, session: AgentSession, info: dict) -> None:
-    async def write() -> None:
-        path = TRANSCRIPTS / f"{ctx.room.name}.json"
-        data = json.dumps({**info, **session.history.to_dict()}, indent=2)
-        await asyncio.to_thread(_write_file, path, data)
-        log.info("transcript: %s", path)
-
-    ctx.add_shutdown_callback(write)
-
-
-def _write_file(path: Path, data: str) -> None:
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(data)
-
-
 async def answered_in_time(ctx: JobContext) -> bool:
     try:
         async with asyncio.timeout(ANSWER_TIMEOUT):
             return await wait_until_answered(ctx)
     except TimeoutError:
         return False
+
+
+def _is_owner(p: rtc.Participant) -> bool:
+    """Anyone in the room who is neither the phone line nor an agent."""
+    return p.identity != PHONE and p.kind != rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+
+
+async def serve_owner(ctx: JobContext, agent: PhoneAgent) -> None:
+    """Owner lines and takeovers arrive as room events; handle them in order
+    until the room is gone."""
+    inbox: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    ctx.room.on("data_received", lambda packet: inbox.put_nowait(("data", packet)))
+    ctx.room.on("participant_connected", lambda p: inbox.put_nowait(("joined", p)))
+    ctx.room.on("participant_disconnected", lambda p: inbox.put_nowait(("left", p)))
+    ctx.room.on("disconnected", lambda *_: inbox.put_nowait(("gone", None)))
+    while True:
+        kind, item = await inbox.get()
+        if kind == "gone":
+            return
+        if kind == "data" and item.topic == OWNER_TOPIC:
+            agent.owner_says(str(json.loads(item.data).get("text", "")))
+        elif kind == "joined" and _is_owner(item):
+            await agent.owner_joined()
+        elif kind == "left" and _is_owner(item) and ctx.room.remote_participants:
+            agent.owner_left()
+
+
+# the report ----------------------------------------------------------------
+def transcript_lines(session: AgentSession) -> list[str]:
+    lines = []
+    for item in session.history.items:
+        role, text = getattr(item, "role", ""), getattr(item, "text_content", "")
+        if role in ("user", "assistant") and text:
+            lines.append(f"{'Them' if role == 'user' else 'Agent'}: {text}")
+    return lines
+
+
+async def summarize(task: str, lines: list[str]) -> str:
+    """One or two sentences on what came of the call: the thing that is worth
+    a text message to the owner."""
+    if not lines:
+        return "Nobody picked up." if task else "The caller hung up before saying anything."
+    client = openai.LLM(model=SUMMARY_MODEL)
+    prompt = (
+        f"A phone agent made a call for {OWNER}. Task: {task or 'answer the phone'}\n\n"
+        + "\n".join(lines)
+        + f"\n\nWrite one or two sentences to {OWNER} about what came of the call: what was "
+        "agreed, any time, price, name or confirmation number, and anything left for "
+        f"{OWNER} to do. Plain text, no preamble, address {OWNER} as 'you'."
+    )
+    chat = client.chat(chat_ctx=_user_message(prompt))
+    text = "".join([chunk.delta.content or "" async for chunk in chat if chunk.delta])
+    return text.strip() or "The call ended; see the transcript."
+
+
+def _user_message(text: str) -> Any:  # noqa: ANN401 - the plugin's ChatContext is not exported for typing
+    from livekit.agents import ChatContext  # noqa: PLC0415 - only needed for the report
+
+    chat_ctx = ChatContext()
+    chat_ctx.add_message(role="user", content=text)
+    return chat_ctx
+
+
+async def report(ctx: JobContext, session: AgentSession, info: dict[str, Any]) -> None:
+    """Shutdown: write the transcript, then tell the daemon how it went."""
+    lines = transcript_lines(session)
+    path = TRANSCRIPTS / f"{ctx.room.name}.json"
+    data = json.dumps({**info, **session.history.to_dict()}, indent=2)
+    await asyncio.to_thread(_write_file, path, data)
+    log.info("transcript: %s", path)
+    try:
+        outcome = await summarize(info.get("task", ""), lines)
+    except Exception:  # the report must reach the owner even if the model is down
+        log.exception("could not summarize the call")
+        outcome = "The call ended; see the transcript."
+    body = {
+        "room": ctx.room.name,
+        "outcome": outcome,
+        "details": "\n".join(lines[-12:]),
+        "transcript": str(path.resolve()),
+    }
+    async with (
+        aiohttp.ClientSession() as http,
+        http.post(f"{DAEMON}/api/calls/summary", json=body) as resp,
+    ):
+        if resp.status != HTTPStatus.OK:
+            log.warning("summary not accepted: %s %s", resp.status, await resp.text())
+    log.info("outcome: %s", outcome)
+
+
+def _write_file(path: Path, data: str) -> None:
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(data)
 
 
 server = AgentServer()
@@ -214,7 +335,8 @@ async def phone_agent(ctx: JobContext) -> None:
 
     # Started once someone's on the line, as LiveKit's outbound guide advises.
     session = AgentSession(llm=openai.realtime.RealtimeModel(voice="marin"))
-    save_transcript(ctx, session, {"number": number, "task": agent.task})
+    info = {"number": number, "task": agent.task}
+    ctx.add_shutdown_callback(lambda: report(ctx, session, info))
     await session.start(
         agent=agent,
         room=ctx.room,
@@ -223,6 +345,7 @@ async def phone_agent(ctx: JobContext) -> None:
             delete_room_on_close=True,  # session ends for any reason -> line hangs up
         ),
     )
+    await serve_owner(ctx, agent)
 
 
 if __name__ == "__main__":

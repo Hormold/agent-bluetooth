@@ -1,0 +1,31 @@
+{
+  "name": "Example: Acme Power customer service (a made-up line)",
+  "number": "+18005550123",
+  "owner_name": "Alex",
+  "on_person": "handoff",
+  "lock_keys_until": "main menu",
+  "secrets": {
+    "account number (key it in, digits only)": "CALLER_ACCOUNT",
+    "ZIP code on the account": "CALLER_ZIP"
+  },
+  "menu_rules": [
+    [
+      "all of our representatives are busy|unable to take your call",
+      "hangup"
+    ],
+    [
+      "billing questions press 2|for billing press 2",
+      "keys:2"
+    ],
+    [
+      "to speak with a representative press 0|to speak to an agent press 0",
+      "keys:0+queue"
+    ]
+  ],
+  "menu_hints": "Main menu: 1 outages, 2 billing, 3 start or stop service. Billing asks for the account number (key it in), then offers 0 for a representative at the end of its list. The outage line (1) is a recording and loops.",
+  "standing_answers": {
+    "are you the account holder": "Yes",
+    "is this about an outage": "No"
+  },
+  "notes": "Weekdays 7-7. Best time: right at 7:00. 'All representatives are busy' hangs up; redial every 10 minutes."
+}

@@ -10,11 +10,15 @@ struct RoundIconButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 22, weight: .medium))
-                .frame(width: 60, height: 60)
-                .background(filled ? tint : Color.secondary.opacity(0.15), in: Circle())
-                .foregroundStyle(filled ? .white : tint)
-                .accessibilityHidden(true)
+            VStack(spacing: 6) {
+                Image(systemName: symbol).font(.system(size: 22, weight: .medium))
+                    .frame(width: 60, height: 60)
+                    .background(filled ? tint : Color.secondary.opacity(0.15), in: Circle())
+                    .foregroundStyle(filled ? .white : tint)
+                // visible caption: icons alone don't say what a call control does
+                Text(label).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .accessibilityHidden(true)
         }
         .buttonStyle(PressButtonStyle())
         .accessibilityLabel(label)

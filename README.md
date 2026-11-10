@@ -7,7 +7,7 @@ menu, chase a refund. No Twilio, no SIP trunk, no new number.
 
 ```bash
 agent-bluetooth call +14155550142 --agent phone-agent \
-  --task "Book a table for two tonight at 7, under Nikita"
+  --task "Book a table for two tonight at 7, under Sam"
 ```
 
 The phone dials, the agent waits for someone to pick up, handles the
@@ -21,8 +21,13 @@ conversation, hangs up, and saves the transcript.
 - **Calls, both ways.** Your agent places calls and answers them. Each call
   is a LiveKit room with your phone in it as a SIP participant (DTMF
   included), so anything built for LiveKit telephony works unchanged.
+- **You stay in the loop.** Type `agent-bluetooth say "make it 8 instead"`
+  mid-call and the agent says it, in its own voice. Press *Take over* in the
+  Mac app and it hands the caller to you. When the call ends, it texts you
+  what came of it (`call.summary`).
 - **Recording**: one switch records every call, both sides in stereo.
-- **Texts** (Android): send, list, wait for a reply.
+- **Texts** (Android): send, list, wait for a reply, and `otp on` to forward
+  every login code to Telegram.
 - **Contacts and call history**, synced from the phone.
 - **A CLI and HTTP API** that print JSON, plus a **Claude Code skill**, so a
   coding agent can text and call too.
@@ -57,6 +62,9 @@ agent-bluetooth sms +14155550142 "Running 10 min late"
 agent-bluetooth wait sms.received --match sender=+14155550142
 agent-bluetooth call +14155550142 && agent-bluetooth wait call.active
 agent-bluetooth dtmf 1
+agent-bluetooth say "Ask if they take walk-ins too"   # the agent says it next
+agent-bluetooth wait call.summary                     # how the call went
+agent-bluetooth otp on                                # login codes -> Telegram
 agent-bluetooth contacts anna
 agent-bluetooth debug                  # when something's off
 ```
@@ -68,8 +76,9 @@ call someone. Full recipe: `agent-bluetooth guide`.
 ## Your agent makes the call
 
 [examples/livekit-agent](examples/livekit-agent) is a complete voice agent on
-[LiveKit Agents](https://docs.livekit.io/agents/): about 200 lines, one file,
-both directions.
+[LiveKit Agents](https://docs.livekit.io/agents/): one file, both directions,
+and it listens to you: `say` lines, take-overs, and a one-line report of every
+call posted back to the daemon.
 
 ```bash
 cd examples/livekit-agent && cp .env.example .env    # add OPENAI_API_KEY
@@ -101,6 +110,36 @@ on your laptop; [LiveKit Cloud](https://cloud.livekit.io) hosts it when your
 agent needs to be reachable from anywhere. agent-bluetooth only adds the
 missing piece: a real phone line in the room.
 
+## Send an AI to wait on hold for you
+
+The calls nobody wants to make: the insurer, the airline, the utility, the bank. Forty minutes of "press 3", a code to type, hold music, and
+"we are receiving more calls than we can answer". Hand that to an agent:
+
+```bash
+cd examples/livekit-agent
+./ivr.sh worker profiles/local/insurer.json &          # the agent, tuned for that line
+./ivr.sh redial profiles/local/insurer.json "Ask why my refund hasn't arrived"
+```
+
+- **It walks the menu**: keys, short spoken answers, verification codes,
+  "say representative". Once it knows a line, plain rules in a JSON profile
+  walk it with no model at all.
+- **It waits.** Hold music, transfers, a full queue: it redials every ten
+  minutes until a person picks up or the lines close.
+- **It asks you, not the stranger.** When the menu wants something it
+  doesn't know, a question card pops up in Agent Phone. You type the answer,
+  and only the agent sees it.
+- **It calls you in.** When a real person answers, Agent Phone jumps to the
+  front with a red frame and a sound: *A person is on the line*. Turn your
+  mic on and talk; you've been listening the whole time.
+- **Your coding agent tunes it.** Claude reads the call log, writes the menu
+  rules and redials, with the [phone-menu-calls](skills/phone-menu-calls/SKILL.md)
+  skill. Account numbers and dates of birth stay in env vars, masked in every log.
+
+The question card, the alert and the Say box work for any LiveKit agent you
+write: mix in [`owner_tools.py`](examples/livekit-agent/owner_tools.py), and
+see [docs/OWNER.md](docs/OWNER.md) for the API.
+
 ## Mac app
 
 <p>
@@ -127,6 +166,12 @@ happens when someone calls.
 
 ## Ideas
 
+- **The assistant button.** A headset has one, and so does this box:
+  `agent-bluetooth assistant on` sends `AT+BVRA=1`, which asks the phone to
+  wake Siri or Gemini and open the audio link to the box, with no call.
+  Anything the assistant can do (messages, reminders, the lights) becomes
+  something your agent can ask for. Experimental: whether the phone opens the
+  link while locked depends on the phone; see the changelog.
 - **A phone in a drawer.** Keep an old phone on the dongle at home. Forward
   your number to it (or give it out as your public number) and the agent
   answers, screens spam, and texts you what matters.
@@ -136,7 +181,7 @@ happens when someone calls.
 
 ## Docs
 
-[Setup](docs/SETUP.md) · [LiveKit](docs/LIVEKIT.md) · [Many phones](docs/FARM.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
+[Setup](docs/SETUP.md) · [LiveKit](docs/LIVEKIT.md) · [You and your agent](docs/OWNER.md) · [Many phones](docs/FARM.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
 Inspired by an idea from [Grigory Bakunov (@bobuk)](https://github.com/bobuk).
 

@@ -47,6 +47,7 @@ struct APIClient: Sendable {
         static let calls = "api/calls"
         static let hangup = "api/calls/hangup"
         static let dtmf = "api/calls/dtmf"
+        static let say = "api/calls/say"
         static let history = "api/calls/history"
         static let token = "api/token"
         static let contacts = "api/contacts"
@@ -71,6 +72,7 @@ struct APIClient: Sendable {
     func dial(_ number: String) async throws { try await post(Path.calls, ["number": .string(number)]) }
     func hangup() async throws { try await post(Path.hangup) }
     func dtmf(_ digits: String) async throws { try await post(Path.dtmf, ["digits": .string(digits)]) }
+    func say(_ text: String) async throws { try await post(Path.say, ["text": .string(text)]) }
     func token(room: String, identity: String) async throws -> JoinInfo {
         try await send(Path.token, body: ["room": .string(room), "identity": .string(identity)])
     }

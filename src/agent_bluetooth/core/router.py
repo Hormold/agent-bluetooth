@@ -101,6 +101,7 @@ class CallRouter:
             E.ROOM_LEFT: self._on_room_left,
         }
         self.bus.subscribe(self.on_event)
+        self.bus.enrich(self._name_event)
 
     @property
     def calls(self) -> dict[str, Call]:
@@ -300,12 +301,25 @@ class CallRouter:
                 call.number = live["number"]
                 call.name = call.name or live.get("name", "")
 
+    def _name_event(self, _type: str, data: dict[str, Any]) -> None:
+        """Give every call event a display name (phonebook, else call history),
+        so clients never see a bare number the phone itself can name."""
+        call = data.get("call")
+        if self.directory is None or not isinstance(call, dict) or call.get("name"):
+            return
+        number = str(call.get("number") or "")
+        if number and (
+            name := self.directory.lookup(number) or self.directory.history_name(number)
+        ):
+            call["name"] = name
+
     def _identify(self, call: Call) -> None:
         """Mark known contacts and fill the name from the phonebook."""
         if self.directory is None or not call.number:
             return
         name = self.directory.lookup(call.number)
         call.contact = name is not None
+        name = name or self.directory.history_name(call.number)
         if name and not call.name:
             call.name = name
 
@@ -326,6 +340,21 @@ class CallRouter:
     ) -> None:
         async with self._transition(call) as line:
             await self._play(line, path, loop=loop, hangup_after=hangup_after)
+
+    async def say(self, call: Call, text: str) -> None:
+        """A line from the owner for the agent on the call (room modes only)."""
+        line = self._lines.get(call.id)
+        if line is None or line.handler is not self.room_bridge:
+            raise RuntimeError(f"call {call.id} is not in a room; nobody is there to say it")
+        await self.room_bridge.say(call, text)
+        self.bus.publish(E.CALL_SAY, call_id=call.id, text=text)
+
+    def find_call(self, call_id: str = "", room: str = "") -> dict[str, Any] | None:
+        """A live or recently ended call by id or room, for reports about it."""
+        for cid, call in self.calls.items():
+            if cid == call_id or (room and room == self.rooms.get(cid, {}).get("room")):
+                return {**call.to_dict(), "room": room, "recording": ""}
+        return self._lines.recall(call_id, room)
 
     def join_info(self, room: str, identity: str) -> dict[str, Any]:
         return self.room_bridge.join_info(room, identity)
@@ -394,7 +423,7 @@ class CallRouter:
         if line.ended:  # ended mid-open; _end is waiting for our lock and finds no room
             await self.room_bridge.close(call)
             raise CallGoneError(f"call {call.id} ended while its room opened")
-        self.rooms[call.id] = info
+        self.rooms[call.id] = {**info, "agent_name": agent_name}
         self.bus.publish(
             E.ROOM_OPENED,
             call_id=call.id,
@@ -419,7 +448,8 @@ class CallRouter:
         for task in (line.routing, line.empty_check):
             if task is not None:
                 task.cancel()
-        save_tape(line, self.bus)
+        room = self.rooms.get(line.call.id, {}).get("room") or line.call.room
+        self._lines.remember(line, room=room, recording=save_tape(line, self.bus))
         try:
             async with line.lock:
                 if line.handler is not None:

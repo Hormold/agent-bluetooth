@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .ports import AudioHandler, Recording
 
 ENDED_REMEMBERED = 64  # late events for these call ids must not bring the call back
+RECENT_KEPT = 32  # ended calls an agent can still report on (call.summary)
 # Filled in by the router (contacts, agent dials); phone events send them empty.
 _ROUTER_KNOWS = ("number", "name", "contact", "room", "task")
 
@@ -43,6 +44,7 @@ class LineBook:
         self._lines: dict[str, Line] = {}
         self._ended: deque[str] = deque(maxlen=ENDED_REMEMBERED)
         self.ending: set[Line] = set()  # retired, still releasing what they held
+        self.recent: deque[dict[str, Any]] = deque(maxlen=RECENT_KEPT)  # newest last
 
     def __iter__(self) -> Iterator[Line]:
         return iter(list(self._lines.values()))
@@ -79,3 +81,14 @@ class LineBook:
     def released(self, line: Line) -> None:
         self.ending.discard(line)
         line.released.set()
+
+    def remember(self, line: Line, *, room: str, recording: str) -> None:
+        """Keep what an agent may still ask about once the call is over."""
+        self.recent.append({**line.call.to_dict(), "room": room, "recording": recording})
+
+    def recall(self, call_id: str = "", room: str = "") -> dict[str, Any] | None:
+        """A recently ended call by id or room name (newest first)."""
+        for call in reversed(self.recent):
+            if call["id"] == call_id or (room and call["room"] == room):
+                return dict(call)
+        return None

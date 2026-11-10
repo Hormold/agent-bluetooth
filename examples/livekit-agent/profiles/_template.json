@@ -1,0 +1,14 @@
+{
+  "name": "Who you are calling, and which line",
+  "number": "+18005550100",
+  "owner_name": "Your first name",
+  "on_person": "handoff",
+  "lock_keys_until": "",
+  "secrets": {"what the menu calls it": "ENV_VAR_NAME"},
+  "menu_rules": [],
+  "menu_hints": "What you already know about this menu, in plain words. Empty on the first call.",
+  "standing_answers": {
+    "question the menu or a person may ask": "the answer, so the agent doesn't have to ask you"
+  },
+  "notes": "Hours, how long the wait usually is, what the best path turned out to be."
+}

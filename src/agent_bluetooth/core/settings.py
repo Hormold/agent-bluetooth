@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 from .ports import PCM_BYTES_PER_SAMPLE
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from .ports import SettingsHost
     from .router import CallRouter
 
@@ -68,6 +71,7 @@ def current(app: SettingsHost) -> dict[str, Any]:
     b = app.bridge
     out["livekit"] = {f: getattr(b, f, "") for f in LIVEKIT_FIELDS}
     out["rules"] = r.rules
+    out["automations"] = app.automations.runtime
     descriptions = []
     for label, direction, mode in (
         ("Incoming", "in", r.incoming_mode),
@@ -170,7 +174,7 @@ def validate_wav(path: str) -> None:
 def validate(app: SettingsHost, data: dict[str, Any]) -> None:
     if not isinstance(data, dict):
         raise SettingsTypeError("Settings must be a JSON object")
-    unknown = set(data) - {*FIELDS, *RECORD_FIELDS, "livekit", "rules"}
+    unknown = set(data) - {*FIELDS, *RECORD_FIELDS, "livekit", "rules", "automations"}
     if unknown:
         raise ValueError(f"Unknown settings: {', '.join(sorted(unknown))}")
     _validate_types(data)
@@ -185,6 +189,8 @@ def validate(app: SettingsHost, data: dict[str, Any]) -> None:
             data.get("play_file") or app.router.play_path,
             data.get("stall_dir") or app.router.stall_dir,
         )
+    if "automations" in data:
+        validate_automations(app, data["automations"])
     _validate_media(app, data)
 
 
@@ -311,6 +317,65 @@ def _validate_rule_shape(where: str, rule: dict[str, Any]) -> str:
     return mode
 
 
+AUTOMATION_KEYS = {"name", "on", "when", "extract", "do"}  # the rest are action params
+
+
+def validate_automations(app: SettingsHost, rules: object) -> None:
+    """Runtime automations: {name?, on: event glob, when?: {field: glob},
+    extract?: {var: regex}, do: action, <action params>: str}. Same shape as
+    the config file's [[automations]]; validated here so a bad rule is a 400,
+    not a warning in the log at the moment it should have fired."""
+    if not isinstance(rules, list):
+        raise SettingsTypeError("automations must be a list")
+    for i, rule in enumerate(rules):
+        where = f"automations[{i}]"
+        if not isinstance(rule, dict):
+            raise SettingsTypeError(f"{where} must be an object")
+        _validate_automation_shape(where, rule, app.automations.actions)
+        _validate_delivery(app, where, rule)
+
+
+def _validate_automation_shape(where: str, rule: dict[str, Any], actions: Iterable[str]) -> None:
+    if not isinstance(rule.get("on"), str) or not rule["on"]:
+        raise ValueError(f"{where}: on must be an event type (glob), e.g. sms.received")
+    if rule.get("do") not in actions:
+        raise ValueError(f"{where}: do must be one of {', '.join(sorted(actions))}")
+    for key in ("when", "extract"):
+        table = rule.get(key, {})
+        if not isinstance(table, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in table.items()
+        ):
+            raise SettingsTypeError(f"{where}: {key} must map names to strings")
+    _validate_patterns(where, rule.get("extract", {}))
+    for key, value in rule.items():
+        if key not in AUTOMATION_KEYS and not isinstance(value, str):
+            raise SettingsTypeError(f"{where}: {key} must be a string")
+
+
+def _validate_patterns(where: str, extract: dict[str, str]) -> None:
+    for var, pattern in extract.items():
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"{where}: extract.{var} is not a valid regex: {exc}") from exc
+
+
+def _validate_delivery(app: SettingsHost, where: str, rule: dict[str, Any]) -> None:
+    """Catch at save time what the action would only discover when it fires."""
+    sinks = app.config.get("sinks", [])
+    if rule["do"] == "telegram" and not (
+        rule.get("bot_token") or any(s.get("adapter") == "telegram" for s in sinks)
+    ):
+        raise ValueError(
+            f'{where}: telegram needs a [[sinks]] adapter = "telegram" entry '
+            "(bot_token, chat_id) in the config, or bot_token/chat_id on the rule"
+        )
+    if rule["do"] == "webhook" and not str(rule.get("url", "")).startswith(("http://", "https://")):
+        raise ValueError(f"{where}: webhook needs url (http:// or https://)")
+    if rule["do"] == "play" and not rule.get("file"):
+        raise ValueError(f"{where}: play needs file")
+
+
 # setting -> (router attribute, coercion); "rules" is copied, not coerced.
 _ROUTER_ATTRS: dict[str, tuple[str, type]] = {
     "incoming": ("incoming_mode", str),
@@ -328,6 +393,8 @@ def apply(app: SettingsHost, data: dict[str, Any]) -> None:
     r = app.router
     if "rules" in data:
         r.rules = list(data["rules"])
+    if "automations" in data:
+        app.automations.runtime = list(data["automations"])
     for key, (attr, coerce) in _ROUTER_ATTRS.items():
         if key in data:
             setattr(r, attr, coerce(data[key]))

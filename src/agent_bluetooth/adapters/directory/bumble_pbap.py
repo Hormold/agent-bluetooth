@@ -39,6 +39,7 @@ class BumblePbapDirectory:
         self.pbap: BumblePbap | None = None
         self.data: dict[str, list[dict[str, Any]]] = {k: [] for k in KINDS}
         self._names: dict[str, str] = {}  # last 10 digits -> contact name, from data["contacts"]
+        self._seen: dict[str, str] = {}  # last 10 digits -> name the phone showed in history
         self.meta: dict[str, Any] = {
             "synced_at": {},
             "duration": {},
@@ -81,6 +82,14 @@ class BumblePbapDirectory:
         if len(key) < MIN_LOOKUP_DIGITS:
             return None
         return self._names.get(key) or None
+
+    def history_name(self, number: str) -> str | None:
+        """Name the phone showed for this number in call history (e.g. a business
+        caller ID from Maps), for numbers that aren't contacts."""
+        key = _digits(number)
+        if len(key) < MIN_LOOKUP_DIGITS:
+            return None
+        return self._seen.get(key) or None
 
     def info(self) -> dict[str, Any]:
         return {
@@ -178,6 +187,13 @@ class BumblePbapDirectory:
             self._names = {
                 _digits(n): c.name for c in items if isinstance(c, Contact) for n in c.numbers
             }
+        else:
+            # newest first from the phone; keep the first name seen per number
+            seen: dict[str, str] = {}
+            for h in items:
+                if isinstance(h, HistoryEntry) and h.name and _digits(h.number):
+                    seen.setdefault(_digits(h.number), h.name)
+            self._seen = seen
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

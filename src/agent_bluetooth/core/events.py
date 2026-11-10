@@ -21,6 +21,13 @@ class E:
     CALL_AUDIO = "call.audio"  # audio link up/down: {call, up, sample_rate}
     # a dial the API accepted never became a call: {request_id, number, command, reason, error}
     CALL_FAILED = "call.failed"
+    # the owner typed a line for the agent on the call to say: {call_id, text}
+    CALL_SAY = "call.say"
+    # what came of a call, posted by the agent that handled it: outcome, details,
+    # transcript, recording, plus the call's number, name, direction, task, room
+    CALL_SUMMARY = "call.summary"
+    # the agent on a call needs the owner now: {call_id, kind: person|question|clear, text}
+    CALL_ATTENTION = "call.attention"
 
     ROOM_OPENED = "room.opened"  # call audio is live in a room
     ROOM_JOINED = "room.joined"  # someone (human/agent) joined the call room

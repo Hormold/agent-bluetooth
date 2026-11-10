@@ -38,6 +38,9 @@ struct ActivityLine {
             }
         case EventType.playbackDone: self.init("play.fill", .secondary, "Finished playing", event.str("file") ?? "")
         case EventType.recordingSaved: self.init("record.circle", .red, "Call recorded", event.str("file") ?? "")
+        case EventType.callSay: self.init("text.bubble.fill", .blue, "Told the agent", event.str("text") ?? "")
+        case EventType.callSummary:
+            self.init("checkmark.seal.fill", .green, "Call with \(Self.who(event.data))", event.str("outcome") ?? "")
         default: self.init("circle.fill", .secondary, event.type)
         }
     }
@@ -49,7 +52,7 @@ struct ActivityLine {
         self.detail = detail
     }
 
-    /// "Name · number", or whichever of the two the call has.
+    /// "Name · number", or whichever of the two the call (or a summary) has.
     private static func who(_ call: JSONObject?) -> String {
         guard let call else { return "" }
         let name = call["name"]?.stringValue ?? ""

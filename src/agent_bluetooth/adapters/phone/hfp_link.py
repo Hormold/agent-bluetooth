@@ -200,6 +200,10 @@ class LinkSupervisor:
         )
         hf.on(hf.EVENT_CLI_NOTIFICATION, self.calls.on_clip)
         hf.on(
+            hf.EVENT_VOICE_RECOGNITION,
+            lambda state: self.bus.publish(E.PHONE_STATUS, assistant=int(state)),
+        )
+        hf.on(
             hf.EVENT_SPEAKER_VOLUME,
             lambda v: self.bus.publish(E.PHONE_STATUS, speaker_volume=v),
         )
