@@ -135,6 +135,26 @@ def _add_call_parsers(sub: argparse._SubParsersAction[_Parser]) -> None:
 
     d = sub.add_parser("dtmf", help="send DTMF digits")
     d.add_argument("digits")
+    say = sub.add_parser(
+        "say",
+        help="tell the agent on the call what to say next",
+        epilog='say "Make it 8 instead, and ask for a table outside"',
+    )
+    say.add_argument("text", nargs="+")
+    say.add_argument("--call-id", default=None)
+    att = sub.add_parser(
+        "attention",
+        help="raise Agent Phone's alert card: a person is on, a question, or clear",
+        epilog='attention question "What is your account ZIP code?"   attention clear',
+    )
+    att.add_argument("kind", choices=["person", "question", "clear"])
+    att.add_argument("text", nargs="*")
+    att.add_argument("--call-id", default="")
+    asst = sub.add_parser(
+        "assistant",
+        help="press the headset's assistant button (Siri / Gemini); experimental",
+    )
+    asst.add_argument("state", nargs="?", choices=["on", "off"], default="on")
     v = sub.add_parser("volume", help="set speaker volume 0..15")
     v.add_argument("level", type=int)
 
@@ -144,6 +164,18 @@ def _add_phone_data_parsers(sub: argparse._SubParsersAction[_Parser]) -> None:
     sm.add_argument("to")
     sm.add_argument("text", nargs="*")
     sm.add_argument("-n", type=int, default=DEFAULT_SMS_LIST, help="list limit, 1..1000")
+
+    otp = sub.add_parser(
+        "otp",
+        help="forward one-time codes from incoming SMS: otp on [--sms NUMBER | --webhook URL]",
+        description="Installs an automation that extracts the 4-8 digit code from every "
+        "incoming SMS and forwards it: to the config's Telegram sink (default), to a "
+        "phone number by SMS, or to a webhook. Android only: iMessage, RCS and MMS never "
+        "reach the daemon.",
+    )
+    otp.add_argument("action", nargs="?", choices=["on", "off"], help="omit to show the rule")
+    otp.add_argument("--sms", metavar="NUMBER", help="text the code to this number")
+    otp.add_argument("--webhook", metavar="URL", help="POST {text, vars} to this URL")
 
     si = sub.add_parser("sim", help="inject fake traffic (fake adapters only)")
     si.add_argument("kind")

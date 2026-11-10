@@ -59,6 +59,16 @@ adapter = "log"
 # on = "call.ended"
 # do = "shell"
 # cmd = "echo \"$AB_NUMBER $AB_STATE\" >> ~/calls.log"
+#
+# How a call went, texted to you (the agent posts call.summary when it ends):
+# [[automations]]
+# name = "call-report"
+# on = "call.summary"
+# do = "sms"
+# to = "+15551234567"
+# text = "{{name}} {{number}}: {{outcome}}"
+#
+# `agent-bluetooth otp on` adds the OTP rule at runtime instead (settings.automations).
 
 # Several phones (one dongle each)? Add instances; see docs/FARM.md.
 # [[instances]]

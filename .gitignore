@@ -10,3 +10,9 @@ apps/AgentPhone/AgentPhone.xcodeproj/
 apps/AgentPhone/*.xcodeproj/
 recordings/
 examples/livekit-agent/calls/
+
+# per-user call profiles (real numbers, owner names)
+examples/livekit-agent/profiles/local/
+# agent memory/worktrees
+.claude/
+**/.claude/

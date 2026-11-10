@@ -62,5 +62,6 @@ kill -TERM "$FARM"; wait "$FARM" || fail "farm exited non-zero"; FARM=
 pgrep -f "agent_bluetooth serve $CFG" >/dev/null && fail "children outlived the farm"
 scripts/scenarios/router.sh
 SCENARIO_PORT=$((PORT + 100)) scripts/scenarios/hfp_command_failure.sh
+SCENARIO_PORT=$((PORT + 200)) scripts/scenarios/owner.sh
 uv run --quiet python scripts/scenarios/obex_malformed.py
 echo "smoke ok"

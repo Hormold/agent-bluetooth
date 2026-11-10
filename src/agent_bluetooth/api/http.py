@@ -72,7 +72,11 @@ class HttpApi:
         r.add_post("/api/calls/dtmf", self._cmd(lambda p, b: p.send_dtmf(b["digits"])))
         r.add_post("/api/calls/play", self.play)
         r.add_post("/api/calls/bridge", self.bridge)
+        r.add_post("/api/calls/say", self.say)
+        r.add_post("/api/calls/summary", self.summary)
+        r.add_post("/api/calls/attention", self.attention)
         r.add_post("/api/volume", self._cmd(lambda p, b: p.set_volume(int(b["level"]))))
+        r.add_post("/api/assistant", self.assistant)
         r.add_post("/api/sms", self.send_sms)
         r.add_get("/api/sms", self.list_sms)
         r.add_get("/api/contacts", self.contacts)
@@ -126,7 +130,11 @@ class HttpApi:
     async def status(self, _: web.Request) -> web.Response:
         router = self.app.router
         calls = [
-            {**c.to_dict(), "room": router.rooms.get(c.id, {}).get("room")}
+            {
+                **c.to_dict(),
+                "room": router.rooms.get(c.id, {}).get("room"),
+                "agent_name": router.rooms.get(c.id, {}).get("agent_name", ""),
+            }
             for c in router.calls.values()
         ]
         return web.json_response(
@@ -180,6 +188,14 @@ class HttpApi:
             )
             self.app.ctx.bus.publish(E.CALL_FAILED, request_id=request_id, number=number, **failure)
 
+    async def assistant(self, request: web.Request) -> web.Response:
+        fn = getattr(self.app.phone, "assistant", None)
+        if fn is None:
+            raise web.HTTPNotImplemented(text="this phone adapter has no assistant button")
+        body = await request.json() if request.can_read_body else {}
+        await fn(on=as_bool(body.get("on"), default=True))
+        return web.json_response({"ok": True})
+
     async def play(self, request: web.Request) -> web.Response:
         body = await request.json()
         call = self._active_call(body.get("call_id"))
@@ -196,6 +212,57 @@ class HttpApi:
         call = self._active_call(body.get("call_id"))
         info = await self.app.router.route_to_room(call)
         return web.json_response({"ok": True, "call_id": call.id, **info})
+
+    async def say(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        text = str(body.get("text", "")).strip()
+        if not text:
+            raise ValueError("say needs text")
+        call = self._active_call(body.get("call_id"))
+        await self.app.router.say(call, text)
+        return web.json_response({"ok": True, "call_id": call.id, "text": text})
+
+    async def summary(self, request: web.Request) -> web.Response:
+        """The agent that handled a call reports how it went. Becomes a
+        call.summary event (sinks and automations deliver it)."""
+        body = await request.json()
+        outcome = str(body.get("outcome", "")).strip()
+        if not outcome:
+            raise ValueError("summary needs outcome: one or two sentences")
+        call = self.app.router.find_call(str(body.get("call_id", "")), str(body.get("room", "")))
+        if call is None:
+            raise web.HTTPNotFound(text="no such call (live or recent): pass call_id or room")
+        event = self.app.ctx.bus.publish(
+            E.CALL_SUMMARY,
+            call_id=call["id"],
+            number=call["number"],
+            name=call["name"],
+            direction=call["direction"],
+            task=call["task"],
+            room=body.get("room") or call.get("room", ""),
+            outcome=outcome,
+            details=str(body.get("details", "")),
+            transcript=str(body.get("transcript", "")),
+            recording=call.get("recording", ""),
+        )
+        return web.json_response({"ok": True, **event.to_dict()})
+
+    async def attention(self, request: web.Request) -> web.Response:
+        """The agent on a call needs the owner right now: a person picked up
+        (kind=person), it has a question (kind=question), or it's over
+        (kind=clear). Becomes a call.attention event; Agent Phone alerts."""
+        body = await request.json()
+        kind = str(body.get("kind", ""))
+        if kind not in ("person", "question", "clear"):
+            raise ValueError("attention needs kind: person, question or clear")
+        call = self.app.router.find_call(str(body.get("call_id", "")), str(body.get("room", "")))
+        event = self.app.ctx.bus.publish(
+            E.CALL_ATTENTION,
+            call_id=call["id"] if call else "",
+            kind=kind,
+            text=str(body.get("text", "")),
+        )
+        return web.json_response({"ok": True, **event.to_dict()})
 
     async def send_sms(self, request: web.Request) -> web.Response:
         if self.app.messages is None:

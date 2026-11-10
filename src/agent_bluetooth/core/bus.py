@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from .events import Event
+from .events import E, Event
 from .tasks import Tasks
 
 if TYPE_CHECKING:
@@ -16,6 +16,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 Handler = Callable[[Event], Awaitable[None]]
+# Runs synchronously on an event's data before anyone sees it (e.g. caller name).
+Enricher = Callable[[str, dict[str, object]], None]
+# Telemetry, not news: signal/battery/volume tick all day. Still on the bus and
+# in `watch`; only the log line drops to DEBUG.
+QUIET_EVENTS = frozenset({E.PHONE_STATUS})
 
 
 class EventBus:
@@ -23,6 +28,7 @@ class EventBus:
         self.instance = instance
         self.backlog = backlog
         self._handlers: list[Handler] = []
+        self._enrichers: list[Enricher] = []
         self._queues: set[asyncio.Queue[Event]] = set()
         self.history: deque[Event] = deque(maxlen=history)
         self.tasks = Tasks(f"{instance}:bus")  # handler dispatch; App.run closes it last
@@ -30,10 +36,21 @@ class EventBus:
     def subscribe(self, handler: Handler) -> None:
         self._handlers.append(handler)
 
+    def enrich(self, fn: Enricher) -> None:
+        """Fill in event data in place before it is logged, stored or delivered."""
+        self._enrichers.append(fn)
+
     def publish(self, type_: str, **data: object) -> Event:
+        for fn in self._enrichers:
+            try:
+                fn(type_, data)
+            except Exception:
+                log.exception("enricher %s failed on %s", fn, type_)
         event = Event(type_, data, instance=self.instance)
         self.history.append(event)
-        log.info("event %s %s", type_, data)
+        log.log(
+            logging.DEBUG if type_ in QUIET_EVENTS else logging.INFO, "event %s %s", type_, data
+        )
         for handler in self._handlers:
             self.tasks.spawn(self._safe(handler, event), name=f"bus:{type_}")
         for queue in self._queues:

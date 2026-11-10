@@ -20,6 +20,13 @@ Contacts/history require a directory adapter and reflect its last sync.
 Send and read SMS:
   agent-bluetooth sms +15551234567 "On my way"
   agent-bluetooth sms list -n 20
+Forward one-time codes from incoming SMS (Android; iMessage/RCS never arrive):
+  agent-bluetooth otp on                       # to the config's telegram sink
+  agent-bluetooth otp on --sms +15551234567    # or text them to a number
+  agent-bluetooth otp on --webhook https://...  # or POST {text, vars}
+  agent-bluetooth otp off | otp
+otp installs a runtime automation (settings.automations, persisted) that
+extracts the first 4-8 digit run from every sms.received and forwards it.
 GET /api/sms?limit=20 returns newest-first sms.received/sms.sent event objects
 {type, data, ts}. Received data has sender/text; sent data has to/text.
 Only observed events since startup are available, capped at 1000 messages.
@@ -33,7 +40,24 @@ Call, wait for the other side to answer, press a key, hang up:
 Let a LiveKit voice agent handle the call (dispatched with the task):
   agent-bluetooth call +15551234567 --agent phone-agent --task "Ask if they're open Sunday"
   agent-bluetooth dtmf '1#'
+  agent-bluetooth say "Make it 8 instead, and ask for a table outside"
+  agent-bluetooth wait call.summary --timeout 900
   agent-bluetooth hangup
+say hands the agent on the call a line to speak next (a data message on topic
+"owner" in the call room); it needs a call in a room (app/agent mode).
+call.summary is posted by the agent when the call ends: data.outcome (one or
+two sentences), data.details (last lines), data.transcript (file path),
+data.recording (when record_calls is on). Sinks (telegram, webhook) and
+automations receive it like any event. POST /api/calls/summary {call_id|room,
+outcome, details?, transcript?} is how an agent reports it.
+An agent that needs the owner mid-call raises Agent Phone's alert card:
+POST /api/calls/attention {kind: person|question|clear, text, room|call_id}
+-> a call.attention event; the app jumps to the front with a sound. The
+owner's typed answer comes back as a say line (topic "owner"). Try it:
+  agent-bluetooth attention question "What ZIP code is on the account?"
+  agent-bluetooth attention clear
+Phone menus and hold queues: examples/livekit-agent/ivr_agent.py, and the
+phone-menu-calls skill. Owner API for agent authors: docs/OWNER.md.
 wait consumes LIVE SSE events only. Start it before the triggering action if
 that action may emit immediately, in another terminal or background process.
 It does not replay events; status shows calls already active. Match keys are

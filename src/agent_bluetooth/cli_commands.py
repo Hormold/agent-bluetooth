@@ -223,6 +223,22 @@ def _dtmf(args: argparse.Namespace) -> None:
     out(request(args, "POST", "/api/calls/dtmf", {"digits": args.digits}))
 
 
+def _attention(args: argparse.Namespace) -> None:
+    body = {"kind": args.kind, "text": " ".join(args.text), "call_id": args.call_id}
+    out(request(args, "POST", "/api/calls/attention", body))
+
+
+def _say(args: argparse.Namespace) -> None:
+    body: JsonObject = {"text": " ".join(args.text)}
+    if args.call_id:
+        body["call_id"] = args.call_id
+    out(request(args, "POST", "/api/calls/say", body))
+
+
+def _assistant(args: argparse.Namespace) -> None:
+    out(request(args, "POST", "/api/assistant", {"on": args.state == "on"}))
+
+
 def _volume(args: argparse.Namespace) -> None:
     out(request(args, "POST", "/api/volume", {"level": args.level}))
 
@@ -237,6 +253,47 @@ def _sms(args: argparse.Namespace) -> None:
     if not args.text:
         fail("sms needs a destination and message text", code=2)
     out(request(args, "POST", "/api/sms", {"to": args.to, "text": " ".join(args.text)}))
+
+
+# one-time codes ---------------------------------------------------------------
+OTP_RULE = "otp"
+OTP_CODE = r"\b(\d{4,8})\b"  # a literal regex: the first 4-8 digit run in the text
+
+
+def _otp_rule(args: argparse.Namespace) -> JsonObject:
+    rule: JsonObject = {
+        "name": OTP_RULE,
+        "on": "sms.received",
+        "extract": {"code": OTP_CODE},
+        "text": "🔐 {{code}} from {{sender}}",
+    }
+    if args.sms and args.webhook:
+        fail("otp on takes --sms or --webhook, not both", code=2)
+    if args.sms:
+        rule.update(do="sms", to=args.sms)
+    elif args.webhook:
+        rule.update(do="webhook", url=args.webhook)
+    else:
+        rule["do"] = "telegram"
+    return rule
+
+
+def _otp(args: argparse.Namespace) -> None:
+    current = request_object(args, "GET", "/api/settings").get("automations", [])
+    others = [r for r in current if r.get("name") != OTP_RULE]
+    if args.action is None:
+        out({"otp": [r for r in current if r.get("name") == OTP_RULE]})
+        return
+    rules = [*others, _otp_rule(args)] if args.action == "on" else others
+    saved = request_object(args, "POST", "/api/settings", {"automations": rules})
+    out(
+        {
+            "otp": [r for r in saved.get("automations", []) if r.get("name") == OTP_RULE],
+            "note": "Forwards codes from SMS only (Android, via MAP): iMessage, RCS and MMS "
+            "never reach the daemon. Check with: sim sms text='Your code is 424242' (fake "
+            "adapters) or a real SMS.",
+        }
+    )
 
 
 def _contacts(args: argparse.Namespace) -> None:
@@ -283,6 +340,10 @@ COMMANDS: dict[str, Handler] = {
     "bridge": _bridge,
     "join": _join,
     "dtmf": _dtmf,
+    "say": _say,
+    "attention": _attention,
+    "assistant": _assistant,
+    "otp": _otp,
     "volume": _volume,
     "sms": _sms,
     "sim": _sim,

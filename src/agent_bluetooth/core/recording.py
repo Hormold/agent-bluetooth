@@ -31,10 +31,11 @@ def tape_for(line: Line, audio: AudioKit, record_dir: str, sample_rate: int) -> 
     return line.tape
 
 
-def save_tape(line: Line, bus: EventBus) -> None:
+def save_tape(line: Line, bus: EventBus) -> str:
+    """Close the call's tape, if any; returns the file it was saved to ("" if none)."""
     tape, line.tape = line.tape, None
     if tape is None:
-        return
+        return ""
     tape.close()
     log.info("saved %s (%.1fs)", tape.path, tape.seconds)
     bus.publish(
@@ -44,3 +45,4 @@ def save_tape(line: Line, bus: EventBus) -> None:
         file=str(tape.path),
         seconds=round(tape.seconds, 1),
     )
+    return str(tape.path)

@@ -35,20 +35,28 @@ _TEMPLATE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
 
 class AutomationEngine:
+    """Rules from the config file, plus `runtime` rules added over the API
+    (`agent-bluetooth otp on`), which settings persist across restarts."""
+
     def __init__(self, ctx: Context, actions: dict[str, Action]) -> None:
-        self.rules: list[dict[str, Any]] = ctx.config.get("automations", [])
+        self.config_rules: list[dict[str, Any]] = ctx.config.get("automations", [])
+        self.runtime: list[dict[str, Any]] = []
         self.actions = actions
         self.tasks = Tasks(f"{ctx.bus.instance}:automations")  # running actions
-        for rule in self.rules:
+        for rule in self.config_rules:
             if rule.get("do") not in actions:
                 log.warning(
                     "automation %r: unknown action %r",
                     rule.get("name", "?"),
                     rule.get("do"),
                 )
-        if self.rules:
-            ctx.bus.subscribe(self.on_event)
-            log.info("loaded %d automations", len(self.rules))
+        ctx.bus.subscribe(self.on_event)
+        if self.config_rules:
+            log.info("loaded %d automations", len(self.config_rules))
+
+    @property
+    def rules(self) -> list[dict[str, Any]]:
+        return [*self.config_rules, *self.runtime]
 
     async def on_event(self, event: Event) -> None:
         fields = _flatten(event)

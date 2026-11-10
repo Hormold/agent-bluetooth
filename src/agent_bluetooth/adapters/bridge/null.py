@@ -43,6 +43,9 @@ class NullBridge:
     def join_info(self, room: str, identity: str) -> dict[str, Any]:
         return {}
 
+    async def say(self, call: Call, text: str) -> None:
+        raise RuntimeError(f"call {call.id} has no room: the null bridge opens none")
+
     @staticmethod
     async def _drain(audio: AudioPipe) -> None:
         while await audio.read() is not None:  # keep the SCO clock fed with silence

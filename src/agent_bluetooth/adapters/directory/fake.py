@@ -3,6 +3,7 @@
 [directory]
 adapter = "fake"
 contacts = [{ name = "Anna Petrova", numbers = ["+14155550142"] }]
+history = [{ name = "Acme Support", number = "+18005550123", kind = "dialed" }]
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ MIN_LOOKUP_DIGITS = 7  # same rule as the PBAP directory: short codes never matc
 class FakeDirectory:
     def __init__(self, ctx: Context, cfg: dict[str, Any]) -> None:
         self._contacts = [_contact(i, c) for i, c in enumerate(cfg.get("contacts", []))]
+        self._history = [_history(i, h) for i, h in enumerate(cfg.get("history", []))]
 
     async def start(self) -> None: ...
 
@@ -27,7 +29,7 @@ class FakeDirectory:
         return [{"name": name, "numbers": list(numbers)} for name, numbers in self._contacts]
 
     async def history(self) -> list[dict[str, Any]]:
-        return []
+        return [dict(h) for h in self._history]
 
     def lookup(self, number: str) -> str | None:
         key = _digits(number)
@@ -38,9 +40,15 @@ class FakeDirectory:
                 return name
         return None
 
+    def history_name(self, number: str) -> str | None:
+        key = _digits(number)
+        if len(key) < MIN_LOOKUP_DIGITS:
+            return None
+        return next((h["name"] for h in self._history if _digits(h["number"]) == key), None)
+
     def info(self) -> dict[str, Any]:
         return {
-            "counts": {"contacts": len(self._contacts), "history": 0},
+            "counts": {"contacts": len(self._contacts), "history": len(self._history)},
             "synced_at": {},
             "duration": {},
             "syncing": None,
@@ -66,3 +74,13 @@ def _contact(i: int, raw: object) -> tuple[str, tuple[str, ...]]:
     if len(checked) != len(numbers):
         raise TypeError(f"directory.contacts[{i}].numbers must be strings")
     return name, checked
+
+
+def _history(i: int, raw: object) -> dict[str, str]:
+    """One `history` entry from the config: the name the phone showed for a number."""
+    if not isinstance(raw, dict):
+        raise TypeError(f"directory.history[{i}] must be a table")
+    entry = {k: raw.get(k, "") for k in ("name", "number", "kind", "at")}
+    if not all(isinstance(v, str) for v in entry.values()) or not entry["number"]:
+        raise TypeError(f"directory.history[{i}] needs a number and string fields")
+    return {k: str(v) for k, v in entry.items()}

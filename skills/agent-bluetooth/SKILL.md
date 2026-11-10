@@ -46,13 +46,39 @@ When the user wants something done on a call (book, ask, confirm, cancel) and
 a LiveKit agent is running (the example registers `phone-agent`):
 
 ```bash
-agent-bluetooth call +15551234567 --agent phone-agent --task "Book a table for 2 at 7pm under Nikita"
-agent-bluetooth wait call.ended --timeout 900
+agent-bluetooth call +15551234567 --agent phone-agent --task "Book a table for 2 at 7pm under Sam"
+agent-bluetooth wait call.summary --timeout 900
 ```
 
 Write the task as you would brief a person: who it's for, what to get, what
-to accept. The agent's transcript is saved where it runs
-(`examples/livekit-agent/calls/<room>.json`); read it and report the outcome.
+to accept. When the call ends the agent posts a `call.summary` event:
+`data.outcome` is the one-line result, `data.transcript` the transcript file.
+Report `outcome` to the user. If no summary arrives (an agent that doesn't
+post one), wait for `call.ended` and read the transcript where the agent runs
+(`examples/livekit-agent/calls/<room>.json`).
+
+While the agent is on the call, the user can change its mind:
+
+```bash
+agent-bluetooth say "Make it 8 instead, and ask for a table outside"
+```
+
+The agent stops and says that next, in its own voice. Only for calls in a
+room (app/agent mode); exits 1 otherwise.
+
+## Forward one-time codes
+
+```bash
+agent-bluetooth otp on                        # codes go to the config's Telegram sink
+agent-bluetooth otp on --sms +15551234567     # or by text to that number
+agent-bluetooth otp off
+```
+
+Installs a persisted automation: the first 4-8 digit run in every incoming
+SMS is forwarded. SMS only (Android): iMessage, RCS and MMS never reach the
+daemon, so say so if the user expects those. `otp on` without `--sms` or
+`--webhook` needs a `[[sinks]] adapter = "telegram"` entry in the daemon's
+config and exits 1 with that message otherwise.
 
 ## Find contacts and recent calls
 

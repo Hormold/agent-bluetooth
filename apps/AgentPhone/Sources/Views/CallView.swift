@@ -9,6 +9,7 @@ struct CallView: View {
     let call: Call
     @State private var panel: CallPanel = .hidden
     @State private var typed = ""
+    @State private var line = ""  // a line for the agent (`say`)
 
     var ringingIncoming: Bool { call.incoming && call.state == CallState.ringing }
 
@@ -37,6 +38,7 @@ struct CallView: View {
             }
             .transition(.opacity.combined(with: .offset(y: -4)))
             Spacer(minLength: 8)
+            if call.hasAgent, call.state == CallState.active, center.attention == nil { agentLine }
             if ringingIncoming { ringingControls } else { callControls }
             Spacer().frame(height: 24)
         }
@@ -80,18 +82,54 @@ struct CallView: View {
     private var callControls: some View {
         HStack(spacing: 28) {
             RoundIconButton(
-                symbol: live.muted ? "mic.slash.fill" : "mic.fill", label: live.muted ? "Unmute" : "Mute",
+                symbol: live.muted ? "mic.slash.fill" : "mic.fill", label: live.muted ? "Mic off" : "Mic on",
                 tint: live.muted ? .orange : .secondary, filled: false
             ) { center.toggleMute() }
             RoundIconButton(
                 symbol: "circle.grid.3x3.fill", label: "Keypad", tint: panel == .keypad ? .accentColor : .secondary,
                 filled: false
             ) { toggle(.keypad) }
+            if live.joined {
+                RoundIconButton(
+                    symbol: live.listening ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                    label: live.listening ? "Sound on" : "Sound off",
+                    tint: live.listening ? .secondary : .orange, filled: false
+                ) { center.toggleListening() }
+            }
             RoundIconButton(symbol: "phone.down.fill", label: "Hang up", tint: .red) { center.hangup() }
             if !live.joined {
-                RoundIconButton(symbol: "waveform", label: "Talk here", tint: .green, filled: false) { center.answer() }
+                RoundIconButton(
+                    symbol: call.hasAgent ? "person.wave.2.fill" : "waveform",
+                    label: call.hasAgent ? "Take over" : "Talk here", tint: .green, filled: false
+                ) { center.answer() }
             }
         }
+    }
+
+    /// `agent-bluetooth say` from the call screen: the agent drops what it was
+    /// saying and says this instead, in its own voice.
+    private var agentLine: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "text.bubble")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            TextField("Tell the agent what to say\u{2026}", text: $line)
+                .textFieldStyle(.plain)
+                .onSubmit(sendLine)
+                .accessibilityLabel("Line for the agent")
+            Button("Say", action: sendLine)
+                .disabled(line.trimmingCharacters(in: .whitespaces).isEmpty)
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 24)
+    }
+
+    private func sendLine() {
+        center.say(line)
+        line = ""
     }
 
     private var statsButton: some View {
@@ -115,7 +153,8 @@ struct CallView: View {
         switch call.state {
         case CallState.ringing: call.incoming ? "Incoming call" : "Ringing"
         case CallState.dialing: "Calling\u{2026}"
-        case CallState.active: live.joined ? "On call" : "Connected on phone"
+        case CallState.active:
+            live.joined ? "On call" : (call.hasAgent ? "\(call.agentName) is on the call" : "Connected on phone")
         default: call.state
         }
     }

@@ -6,7 +6,10 @@ import SwiftUI
 /// (answer = join the call's LiveKit room; the daemon picks up on join).
 @MainActor
 final class CallCenter: ObservableObject {
-    private static let pollInterval = Duration.seconds(5)
+    /// Status polling is only a safety net: phone and call changes arrive over
+    /// SSE and trigger a refresh. Poll fast only while that stream is down.
+    private static let pollWhileStreamDown = Duration.seconds(5)
+    private static let pollWhileStreamUp = Duration.seconds(30)
     private static let activityLimit = 200
     private static let macIdentity = "mac"
 
@@ -44,9 +47,18 @@ final class CallCenter: ObservableObject {
     let live = LiveKitRoom()
     let readiness = Readiness()
     private let alert = IncomingCallAlert()
+    private let attentionAlert = AttentionAlert()
+    /// The agent on the call needs you now; drives the red banner and the alert.
+    @Published var attention: CallAttention? {
+        didSet {
+            if let attention, attention != oldValue { attentionAlert.start(attention) }
+            if attention == nil { attentionAlert.stop() }
+        }
+    }
     private var api: APIClient
     private var stream: EventStream?
     private var poll: Task<Void, Never>?
+    private var streamUp = false
     private var contactIndex: PhoneBookIndex?
 
     init() {
@@ -69,9 +81,18 @@ final class CallCenter: ObservableObject {
         alert.onAnswer = { [weak self] in self?.answer() }
         alert.onDecline = { [weak self] in self?.hangup() }
         reconnect()
+        restartPolling()
+    }
+
+    /// (Re)start the status poll at the pace the stream's state calls for, so a
+    /// dropped stream gets the fast pace now, not after a 30 s sleep.
+    private func restartPolling() {
+        poll?.cancel()
+        let interval = streamUp ? Self.pollWhileStreamUp : Self.pollWhileStreamDown
         poll = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: Self.pollInterval)  // cancellation ends the loop on the next check
+                try? await Task.sleep(for: interval)  // cancellation ends the loop on the next check
+                guard !Task.isCancelled else { return }
                 await self?.refresh()
             }
         }
@@ -84,7 +105,13 @@ final class CallCenter: ObservableObject {
         let events = EventStream(
             url: api.eventsURL,
             onEvent: { [weak self] event in self?.handle(event) },
-            onConnection: { [weak self] online in self?.daemonOnline = online })
+            onConnection: { [weak self] online in
+                guard let self else { return }
+                daemonOnline = online
+                guard streamUp != online else { return }
+                streamUp = online
+                restartPolling()
+            })
         events.start()
         stream = events
         Task { await refresh() }
@@ -236,16 +263,25 @@ extension CallCenter {
             Task { await refresh() }
         case EventType.directorySynced:
             loadDirectory()
+        case EventType.callAttention:
+            switch event.str("kind") {
+            case "person": attention = CallAttention(kind: .person, text: event.str("text") ?? "")
+            case "question": attention = CallAttention(kind: .question, text: event.str("text") ?? "")
+            default: attention = nil
+            }
         default:
             break  // unknown or informational: shown in Activity only
         }
     }
 
-    /// Call events carry the phone's record, whose room is always empty; keep
-    /// the room the box already told us about.
+    /// Call events carry the phone's record, whose room and agent are always
+    /// empty; keep what the box already told us about this call.
     private func updateCall(_ update: Call) {
         var update = update
-        if update.room == nil, let current = call, current.id == update.id { update.room = current.room }
+        if let current = call, current.id == update.id {
+            if update.room == nil { update.room = current.room }
+            if update.agentName.isEmpty { update.agentName = current.agentName }
+        }
         call = update
     }
 
@@ -253,9 +289,13 @@ extension CallCenter {
         guard let room = event.str("room"), !room.isEmpty else { return }
         if let id = event.callID, let current = call, current.id != id { return }  // another call's room
         call?.room = room
-        // Outbound calls: join the room automatically so you can talk.
+        if let agent = event.str("agent_name"), !agent.isEmpty { call?.agentName = agent }
+        // Outbound calls you placed: join the room automatically so you can talk.
+        // An agent's call: join as a listener (mic off), so you always hear it.
         // Incoming calls wait for the Answer tap.
-        if event.str("direction") == "out" || call?.direction == "out" {
+        if call?.hasAgent == true {
+            run { try await self.joinRoom(room, mic: false) }
+        } else if event.str("direction") == "out" || call?.direction == "out" {
             run { try await self.joinRoom(room) }
         }
     }
@@ -271,6 +311,7 @@ extension CallCenter {
 
     private func endCall() {
         call = nil
+        attention = nil
         Task { await live.leave() }
     }
 }
@@ -293,10 +334,10 @@ extension CallCenter {
     }
 
     /// Join a LiveKit room by name (fetch a token, connect, publish mic).
-    private func joinRoom(_ room: String) async throws {
+    private func joinRoom(_ room: String, mic: Bool = true) async throws {
         guard !live.joined, !live.joining else { return }
         let info = try await api.token(room: room, identity: Self.macIdentity)
-        try await live.join(url: info.url, token: info.token)
+        try await live.join(url: info.url, token: info.token, mic: mic)
     }
 
     /// In the room: native LiveKit DTMF (the box relays it to the phone, like a
@@ -314,7 +355,25 @@ extension CallCenter {
         }
     }
 
-    func toggleMute() { run { try await self.live.toggleMute() } }
+    func toggleMute() {
+        if live.muted, attention?.kind == .person { attention = nil }  // you're talking now
+        run { try await self.live.toggleMute() }
+    }
+
+    func toggleListening() { run { try await self.live.setListening(!self.live.listening) } }
+
+    /// Answer the agent's question: goes to the agent, not onto the line.
+    func answerAgent(_ text: String) {
+        say(text)
+        attention = nil
+    }
+
+    /// A line for the agent on the call: it stops and says this instead.
+    func say(_ text: String) {
+        let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return }
+        run { try await self.api.say(line) }
+    }
 
     private func resolveRoom(_ call: Call) async throws -> String {
         if let room = call.room { return room }

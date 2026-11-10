@@ -90,8 +90,12 @@ struct Call: Decodable, Identifiable, Equatable, Sendable {
     /// LiveKit room of the call. nil until the box has opened one: the phone's
     /// own call record and call events carry "" here, never a joinable name.
     var room: String?
+    /// The LiveKit agent the box dispatched into this call ("" when none): the
+    /// call screen offers Take over and a line for the agent only then.
+    var agentName: String
 
     var incoming: Bool { direction == "in" }
+    var hasAgent: Bool { !agentName.isEmpty }
     var display: String { name.isEmpty ? (number.isEmpty ? "Unknown" : number) : name }
 
     /// From an event payload or status entry; missing fields fall back to empty.
@@ -102,6 +106,7 @@ struct Call: Decodable, Identifiable, Equatable, Sendable {
         name = object["name"]?.stringValue ?? ""
         state = object["state"]?.stringValue ?? ""
         room = object["room"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+        agentName = object["agent_name"]?.stringValue ?? ""
     }
 
     init(from decoder: any Decoder) throws {
@@ -147,6 +152,9 @@ enum EventType {
     static let callEnded = "call.ended"
     static let callFailed = "call.failed"
     static let callAudio = "call.audio"
+    static let callSay = "call.say"
+    static let callSummary = "call.summary"
+    static let callAttention = "call.attention"
     static let roomOpened = "room.opened"
     static let roomJoined = "room.joined"
     static let roomLeft = "room.left"

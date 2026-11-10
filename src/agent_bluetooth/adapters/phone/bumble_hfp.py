@@ -57,6 +57,7 @@ class BumbleHfpPhone:
                 hfp.HfFeature.REMOTE_VOLUME_CONTROL,
                 hfp.HfFeature.ENHANCED_CALL_STATUS,
                 hfp.HfFeature.ESCO_S4_SETTINGS_SUPPORTED,
+                hfp.HfFeature.VOICE_RECOGNITION_ACTIVATION,
             ],
             supported_hf_indicators=[],
             supported_audio_codecs=[hfp.AudioCodec.CVSD],
@@ -156,6 +157,9 @@ class BumbleHfpPhone:
 
     async def set_volume(self, level: int) -> None:
         await self.commands.set_volume(level)
+
+    async def assistant(self, *, on: bool) -> None:
+        await self.commands.assistant(on=on)
 
     # pairing / device management ------------------------------------------
     async def phones(self) -> list[dict[str, Any]]:

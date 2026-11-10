@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from .automations import AutomationEngine
     from .events import Event
     from .router import CallRouter
 
@@ -206,6 +207,9 @@ class Directory(Component, Protocol):
     def lookup(self, number: str) -> str | None:
         """Contact name for a number, or None when it isn't a contact."""
 
+    def history_name(self, number: str) -> str | None:
+        """Name the phone showed for a number in call history, or None."""
+
     def info(self) -> dict[str, Any]: ...
     def sync(self) -> None:
         """Start a background refresh from the phone."""
@@ -245,6 +249,10 @@ class Bridge(Component, AudioHandler, Protocol):
     def join_info(self, room: str, identity: str) -> dict[str, Any]:
         """Credentials for a human/agent to join a room."""
 
+    async def say(self, call: Call, text: str) -> None:
+        """Hand the agents in the call's room a line from the owner (a data
+        message on topic "owner"). Raises RuntimeError when the call has no room."""
+
 
 @runtime_checkable
 class Sink(Protocol):
@@ -266,10 +274,13 @@ class _RoutedHost(Protocol):
 
 
 class SettingsHost(_RoutedHost, Protocol):
-    """What core/settings.py reads and changes: the router and the bridge."""
+    """What core/settings.py reads and changes: the router, the bridge and
+    the automations added at runtime."""
 
     @property
     def bridge(self) -> Bridge: ...
+    @property
+    def automations(self) -> AutomationEngine: ...
 
 
 class ActionHost(_RoutedHost, Protocol):

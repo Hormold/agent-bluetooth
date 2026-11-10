@@ -26,10 +26,18 @@ class TelegramSink:
 
     def render(self, event: Event) -> str | None:
         d = event.data
-        call = d.get("call", {})
         match event.type:
             case E.SMS_RECEIVED:
                 return f"💬 <b>SMS from {_who(d)}</b>\n{escape(d.get('text', ''))}"
+            case E.PHONE_CONNECTED:
+                return f"🔗 Phone connected: {escape(d.get('name', ''))}"
+            case E.PHONE_DISCONNECTED:
+                return "⛓️‍💥 Phone disconnected"
+        return self._render_call(event)
+
+    def _render_call(self, event: Event) -> str | None:
+        d = event.data
+        match event.type:
             case E.ROOM_OPENED if d.get("direction") == "in":
                 link = (
                     f'\n<a href="{self.web_url}/?room={d["room"]}">Join the call</a>'
@@ -38,11 +46,10 @@ class TelegramSink:
                 )
                 return f"📞 <b>Incoming call</b> from {_who(d)}\nRoom: <code>{escape(d['room'])}</code>{link}"
             case E.CALL_ENDED:
-                return f"☎️ Call with {_who(call)} ended"
-            case E.PHONE_CONNECTED:
-                return f"🔗 Phone connected: {escape(d.get('name', ''))}"
-            case E.PHONE_DISCONNECTED:
-                return "⛓️‍💥 Phone disconnected"
+                return f"☎️ Call with {_who(d.get('call', {}))} ended"
+            case E.CALL_SUMMARY:
+                task = f"\n<i>{escape(d['task'])}</i>" if d.get("task") else ""
+                return f"✅ <b>Call with {_who(d)}</b>{task}\n{escape(d.get('outcome', ''))}"
         return None
 
     async def handle(self, event: Event) -> None:
