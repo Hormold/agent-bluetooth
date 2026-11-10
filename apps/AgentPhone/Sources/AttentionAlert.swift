@@ -45,6 +45,7 @@ final class AttentionAlert {
 /// What the agent needs from you (daemon event call.attention).
 struct CallAttention: Equatable {
     enum Kind { case person, question }
+
     let kind: Kind
     let text: String
 

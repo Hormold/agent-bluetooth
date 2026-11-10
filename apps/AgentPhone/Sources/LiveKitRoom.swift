@@ -19,7 +19,7 @@ final class LiveKitRoom: ObservableObject {
 
     /// `mic: false` joins as a listener (an agent's call): you hear it, the
     /// line doesn't hear you until you turn the mic on.
-    func join(url: String, token: String, mic: Bool = true) async throws {
+    func join(url: String, token: String, mic: Bool) async throws {
         guard !joining, !joined else { return }
         joining = true
         defer { joining = false }
@@ -55,14 +55,14 @@ final class LiveKitRoom: ObservableObject {
     }
 
     /// Hear the call or not: subscribes to / drops the remote audio.
-    func setListening(_ on: Bool) async throws {
+    func setListening(_ enabled: Bool) async throws {
         guard let room else { return }
         for participant in room.remoteParticipants.values {
             for publication in participant.audioTracks {
-                try await (publication as? RemoteTrackPublication)?.set(enabled: on)
+                try await (publication as? RemoteTrackPublication)?.set(enabled: enabled)
             }
         }
-        listening = on
+        listening = enabled
     }
 
     func leave() async {

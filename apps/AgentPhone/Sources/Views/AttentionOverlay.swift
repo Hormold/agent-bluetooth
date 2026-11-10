@@ -25,10 +25,13 @@ struct AttentionOverlay: View {
         }
     }
 
+    private static func icon(_ kind: CallAttention.Kind) -> String {
+        kind == .person ? "exclamationmark.triangle.fill" : "questionmark.bubble.fill"
+    }
+
     private func card(_ attention: CallAttention) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(attention.title, systemImage: attention.kind == .person
-                  ? "exclamationmark.triangle.fill" : "questionmark.bubble.fill")
+            Label(attention.title, systemImage: Self.icon(attention.kind))
                 .font(.headline)
                 .foregroundStyle(.white)
             if !attention.text.isEmpty {
